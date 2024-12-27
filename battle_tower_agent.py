@@ -1,6 +1,7 @@
 import time
 import uuid
 
+
 import cv2
 import numpy as np
 import os
@@ -225,7 +226,10 @@ class TowerState(Enum):
     LOST_SET = 103
 
 
-class AAgent:
+
+class BattleTowerAgent:
+    strategy = None
+
     def __init__(self, render=True):
         self.env = PokemonEnv(
             include_bottom_screen=True,
@@ -239,8 +243,8 @@ class AAgent:
         self.longest_streak = 0
         self.num_attempts = 0
         self.cur_frame = None
-        self.num_frames = 0
-        self.set_time = 0
+
+        self.num_cycles = 0
 
         self.reset()
 
@@ -250,7 +254,6 @@ class AAgent:
         self.env.reset()
         self.env.step(None)
 
-        self.set_time = time.time()
 
     def play(self):
 
@@ -262,6 +265,9 @@ class AAgent:
         Plays a single 7-game set through the battle tower, returning True if we won the set and False if we lost.
         Requires the player to be directly adjacent and facing the center person; it will return the player in the same spot and direction.
         """
+        start_time = time.time()
+        start_cycle = self.num_cycles
+
         if self.current_streak == 0:
             self.num_attempts += 1
             logger.info(f'Starting attempt {self.num_attempts}, current winstreak record is {self.longest_streak}.')
@@ -309,7 +315,9 @@ class AAgent:
         self.state = TowerState.LOBBY
 
         end_time = time.time() # it's about 2x faster to not render stuff
-        logger.debug(f'Finished set in {end_time - self.set_time}s, it took {self.num_frames} cycles, which comes out to {self.num_frames / (end_time - self.set_time)} frames/s')
+        duration = end_time - start_time
+        cycles = self.num_cycles - start_cycle
+        logger.debug(f'Finished set in {duration}s, it took {cycles} cycles, which comes out to {cycles / duration} frames/s')
 
         return won
 
@@ -323,6 +331,8 @@ class AAgent:
             self._log_error_image('not_in_battle_tower')
             raise ValueError(f'The agent is attempting to fight a battle but the player is not in the battle tower. Expected state to be {TowerState.BATTLE_TOWER} or {TowerState.BATTLE}, got {self.state}.')
 
+        start_time = time.time()
+        start_cycle = self.num_cycles
         logger.debug(f'Beginning battle #{self.current_streak}')
 
         self.state = self._wait_for(
@@ -331,20 +341,28 @@ class AAgent:
             check_first=True, # and it's possible that we're already in the fight
         )
 
-        savestate_file = uuid.uuid4().hex + '.dst' # remember to delete this later
+        # savestate_file = uuid.uuid4().hex + '.dst' # remember to delete this later
         #self.env.emu.savestate.save_file(savestate_file)
 
-        # okay, now we're ready to search; right now the strategy is to run through each of the 4 moves until the end of the battle and see which one wins (prioritizing earlier moves over later moves)
-        state = self._run_battle_loop(savestate_file, turn=0, max_depth=0, move_selection=0)
+        state = self._run_battle_loop()
+
+        duration = time.time() - start_time
+        cycles = self.num_cycles - start_cycle
+        logger.debug(f'Finished game in {duration}s, it took {cycles} cycles, which comes out to {cycles / duration} frames/s')
 
         return state
 
-
+    def _select_and_execute_move(self) -> TowerState:
+        """
+        This function is what makes the agent an agent. It is how we control which moves (or switches) that the agent takes.
+        It expects that we're in move select, and it returns the TowerState that we're in after successfully selecting a move/advanced the game in one way or another.
+        """
+        raise NotImplementedError("The BattleTowerAgent class is an abstract class, you need to subclass it and implement _select_and_execute_move yourself.")
 
     def _act(self, action: str | None = None) -> np.ndarray:
         """This function is basically a wrapper for the env.step but it also handles render logic"""
         frame = self.env.step(action)
-        self.num_frames +=1
+        self.num_cycles +=1
         if self.render:
             # for display purposes, I want the screen to be 2x bigger
             display_frame = cv2.resize(frame, (frame.shape[1] * 2, frame.shape[0] * 2), interpolation=cv2.INTER_NEAREST)
@@ -399,6 +417,24 @@ class AAgent:
                     reached_state = run_checks(self.cur_frame)
 
         return reached_state
+
+    def _wait_for_battle_states(self):
+        """
+        Whenever we're in a battle, these are the possible states we could reach after clicking any move
+        This is a special case of _wait_for that we'll tend to use in the battle loop
+        """
+        return self._wait_for(
+            (in_battle, TowerState.BATTLE),
+            (in_move_select, TowerState.MOVE_SELECT),
+            (pokemon_is_fainted, TowerState.SWAP_POKEMON),
+            (is_next_opponent_box, TowerState.WON_BATTLE),
+            (at_save_battle_video, TowerState.END_OF_SET),
+            button_press='A',
+            # since we need some more advanced logic, I don't want anything advancing automatically
+            # NOTE: DON'T CHANGE THIS OR ELSE IT CAUSES A REALLY TRICKY BUG WHEN WAITING FOR BOTH BATTLE AND MOVE_SELECT
+            check_first=True,
+        )
+
 
     def _select_pokemon(self):
         """Handles the Pokemon select screen by selecting the first 3 Pokemon in the party."""
@@ -466,7 +502,7 @@ class AAgent:
 
         return state
 
-    def _run_battle_loop(self, savestate_path: str, turn: int = 0, max_depth : int = 0, move_selection: int | list[int] = 0) -> TowerState:
+    def _run_battle_loop(self) -> TowerState:
         """
         This is where the battle logic gets handled. By default, it just acts like the A-only agent, but by playing around
         w/ the maximum depth, it can do lookahead search using the provided moves.
@@ -480,71 +516,23 @@ class AAgent:
             self._log_error_image(message='not_in_battle', state=self.state)
             raise ValueError(f'Expected to be in a battle with the Fight screen up when calling `_run_battle_loop`, but the current state is {self.state}')
 
-        logger.debug(f'Starting battle loop on turn {turn}, max_depth is {max_depth}, choosing move(s) {move_selection}')
-
-        if isinstance(move_selection, int):
-            move_selection = [move_selection]
+        logger.debug(f'Starting battle loop')
 
         state = self.state
 
-        def wait_for_battle_states():
-            """Whenever we're in a battle, these are the possible states we could reach after clicking any move"""
-            return self._wait_for(
-                (in_battle, TowerState.BATTLE),
-                (in_move_select, TowerState.MOVE_SELECT),
-                (pokemon_is_fainted, TowerState.SWAP_POKEMON),
-                (is_next_opponent_box, TowerState.WON_BATTLE),
-                (at_save_battle_video, TowerState.END_OF_SET),
-                button_press='A',
-                # since we need some more advanced logic, I don't want anything advancing automatically
-                # NOTE: DON'T CHANGE THIS OR ELSE IT CAUSES A REALLY TRICKY BUG WHEN WAITING FOR BOTH BATTLE AND MOVE_SELECT
-                check_first=True,
-            )
-
         while state != TowerState.WON_BATTLE and state != TowerState.END_OF_SET:
-            # this is a special case; we basically play the game normally and there is no search
-            if max_depth == 0:
                 # NOTE: this works even on the first turn when you have to highlight the fight button b/c the while loop goes back to here
                 if state == TowerState.BATTLE:
-                   self._general_button_press('A')
+                    self._general_button_press('A')
 
                 # NOTE: w/ struggle (and maybe some other effect), you don't get to go into move select, you hit Fight and it happens automatically
                 #  so you'll either go to the next turn (w/ the Fight screen), you'll have to swap a pokemon, or the battle will end
                 #  which is why I still have to `_wait_for` after entering the move screen
-                state = wait_for_battle_states()
+                state = self._wait_for_battle_states()
 
                 if state == TowerState.MOVE_SELECT:
                     self.state = state
-                    move = move_selection[min(turn, len(move_selection) - 1)]
-
-                    # There's one slight snag, we may or may not be able to select the move (e.g. due to torment, choice specs)
-                    #  but you are *still* in move select, unlike certain other conditions
-                    # There's no (good) way to know until after we click it, so we've just got to keep trying until we get it
-                    advanced_game = False
-                    for i in range(POKEMON_MAX_MOVES):
-                        # i is 0 at first, if the first move is successful, we'll never have to go to the next one
-                        chosen_move = move + i
-                        self._goto_move(chosen_move)
-
-                        self._general_button_press('A')
-                        state = wait_for_battle_states()
-
-                        # any other state but MOVE_SELECT means that the move 'worked' (i.e. advanced the game)
-                        # and so we can handle the logic of the next turn, otherwise we have to keep looping through the moves and trying them
-                        if state != TowerState.MOVE_SELECT:
-                            advanced_game = True
-                            self.state = TowerState.BATTLE # this is important b/c we need to reset the state back to BATTLE
-
-                            break
-
-                    if not advanced_game:
-                        self._log_error_image('could_not_make_move', state)
-                        raise ValueError('Could not select a move while in move select (for some reason)')
-
-                    # okay, this isn't *technically* the right place to increment `turn`,
-                    #  we can sometimes advance a turn by just hitting Fight and struggling,
-                    #  and some moves (e.g. Outrage) take multiple turns too, but this is good enough for now (plus it supports the move logic well)
-                    turn += 1
+                    state = self._select_and_execute_move()
 
                 # I'm not using elif b/c this handles the cases where we don't go into move select (e.g. struggle) and faint,
                 #  *or* we went into move select, chose a move, then fainted afterwards
@@ -646,9 +634,48 @@ class AAgent:
         log_fname += '.png'
 
         cv2.imwrite(os.path.join(log_dir, log_fname), self.cur_frame)
-    
+
+
+class BattleTowerAAgent(BattleTowerAgent):
+    strategy = 'A'
+
+    def _select_and_execute_move(self) -> TowerState:
+        move = 0
+        # the 'A' agent always tries to select the first move, but if that fails,
+        # we have some logic that'll let us select another move
+
+        state = self.state
+
+        # There's one slight snag, we may or may not be able to select the move (e.g. due to torment, choice specs)
+        #  but you are *still* in move select, unlike certain other conditions
+        # There's no (good) way to know until after we click it, so we've just got to keep trying until we get it
+        advanced_game = False
+        for i in range(POKEMON_MAX_MOVES):
+            # i is 0 at first, if the first move is successful, we'll never have to go to the next one
+            chosen_move = move + i
+            self._goto_move(chosen_move)
+
+            self._general_button_press('A')
+            state = self._wait_for_battle_states()
+
+            # any other state but MOVE_SELECT means that the move 'worked' (i.e. advanced the game)
+            # and so we can handle the logic of the next turn, otherwise we have to keep looping through the moves and trying them
+            if state != TowerState.MOVE_SELECT:
+                advanced_game = True
+                self.state = TowerState.BATTLE  # this is important b/c we need to reset the state back to BATTLE
+
+                break
+
+        if not advanced_game:
+            self._log_error_image('could_not_make_move', state)
+            raise ValueError('Could not select a move while in move select (for some reason)')
+
+        return state
+
+
+
 if __name__ == '__main__':
-    agent = AAgent(render=True)
+    agent = BattleTowerAAgent(render=False)
 
     agent.play()
 
