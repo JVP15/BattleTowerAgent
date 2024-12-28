@@ -7,6 +7,7 @@ import numpy as np
 import os
 import datetime
 
+from battle_tower_database.interface import BattleTowerDBInterface, BattleTowerServerDBInterface
 from pokemon_env import PokemonEnv
 
 from enum import Enum
@@ -19,7 +20,7 @@ logging.BUTTON_PRESS = 5
 logging.addLevelName(logging.BUTTON_PRESS, 'BUTTON_PRESS')
 
 logging.basicConfig(level=logging.DEBUG)
-logger = logging.getLogger('SearchAgent')
+logger = logging.getLogger('TowerAgent')
 
 ROM_DIR = 'ROM'
 
@@ -228,12 +229,14 @@ class TowerState(Enum):
 
 
 class BattleTowerAgent:
-    strategy = None
+    # you'll have to override these in subclasses
+    strategy: str = None
+    team: str = None # NOTE: this should ideally be a Showdown-compatible format
 
-    def __init__(self, render=True):
+    def __init__(self, render=True, savestate_file=BATTLE_TOWER_SAVESTATE, db_interface: BattleTowerDBInterface = None):
         self.env = PokemonEnv(
             include_bottom_screen=True,
-            savestate_files=[BATTLE_TOWER_SAVESTATE],
+            savestate_files=[savestate_file],
         )
         self.render = render
 
@@ -245,6 +248,12 @@ class BattleTowerAgent:
         self.cur_frame = None
 
         self.num_cycles = 0
+        self.cur_battle_start_cycle = 0 # this is useful for keeping track of the duration of a battle (mainly for DB logging purposes)
+
+        if db_interface is None: # the default DBInterface is a no-op
+            db_interface = BattleTowerDBInterface()
+
+        self.db_interface = db_interface
 
         self.reset()
 
@@ -253,7 +262,6 @@ class BattleTowerAgent:
         self.cur_frame = None
         self.env.reset()
         self.env.step(None)
-
 
     def play(self):
 
@@ -266,11 +274,12 @@ class BattleTowerAgent:
         Requires the player to be directly adjacent and facing the center person; it will return the player in the same spot and direction.
         """
         start_time = time.time()
-        start_cycle = self.num_cycles
+        set_start_cycle = self.num_cycles
 
         if self.current_streak == 0:
             self.num_attempts += 1
             logger.info(f'Starting attempt {self.num_attempts}, current winstreak record is {self.longest_streak}.')
+            self.db_interface.on_streak_start(team=self.team, strategy=self.strategy)
 
         # this will get us through the initial dialog (including selecting singles battle, etc)
         self.state = self._wait_for((in_pokemon_select, TowerState.POKEMON_SELECT), button_press='A')
@@ -300,6 +309,7 @@ class BattleTowerAgent:
         if state == TowerState.WON_SET:
             self.current_streak += 1
             logger.info(f'Won the set! The current streak is {self.current_streak}')
+            self.db_interface.on_battle_end(won=True, duration=self.num_cycles - self.cur_battle_start_cycle)
 
             if self.current_streak > self.longest_streak:
                 logger.info(
@@ -311,12 +321,15 @@ class BattleTowerAgent:
             logger.info(f'Lost the last game. The win streak ended on game {self.current_streak + 1}.')
             self.current_streak = 0
 
+            self.db_interface.on_battle_end(won=False, duration=self.num_cycles - self.cur_battle_start_cycle)
+            self.db_interface.on_streak_end()
+
         # whether we won or lost, we should be back in the lobby at this point
         self.state = TowerState.LOBBY
 
         end_time = time.time() # it's about 2x faster to not render stuff
         duration = end_time - start_time
-        cycles = self.num_cycles - start_cycle
+        cycles = self.num_cycles - set_start_cycle
         logger.debug(f'Finished set in {duration}s, it took {cycles} cycles, which comes out to {cycles / duration} frames/s')
 
         return won
@@ -332,7 +345,7 @@ class BattleTowerAgent:
             raise ValueError(f'The agent is attempting to fight a battle but the player is not in the battle tower. Expected state to be {TowerState.BATTLE_TOWER} or {TowerState.BATTLE}, got {self.state}.')
 
         start_time = time.time()
-        start_cycle = self.num_cycles
+        self.cur_battle_start_cycle = self.num_cycles
         logger.debug(f'Beginning battle #{self.current_streak}')
 
         self.state = self._wait_for(
@@ -341,13 +354,10 @@ class BattleTowerAgent:
             check_first=True, # and it's possible that we're already in the fight
         )
 
-        # savestate_file = uuid.uuid4().hex + '.dst' # remember to delete this later
-        #self.env.emu.savestate.save_file(savestate_file)
-
         state = self._run_battle_loop()
 
         duration = time.time() - start_time
-        cycles = self.num_cycles - start_cycle
+        cycles = self.num_cycles - self.cur_battle_start_cycle
         logger.debug(f'Finished game in {duration}s, it took {cycles} cycles, which comes out to {cycles / duration} frames/s')
 
         return state
@@ -478,6 +488,7 @@ class BattleTowerAgent:
             if state == TowerState.WON_BATTLE:
                 self.current_streak += 1
                 logger.info(f'Won a battle. The current streak is {self.current_streak}')
+
                 # this is a check for my logic to make sure that I'm capturing wins properly, it *should* always be true, but my code may be buggy so...
                 next_opp_number = get_battle_number(self.cur_frame)
                 if self.current_streak % 7 != next_opp_number - 1:
@@ -496,6 +507,7 @@ class BattleTowerAgent:
                 #  so we need to manually press A here (it avoids a bug of counting the win twice)
                 self._general_button_press('A')
 
+                self.db_interface.on_battle_end(won=True, duration=self.num_cycles - self.cur_battle_start_cycle)
 
         # we've lost the game or won the whole set, either way, the battle loop is finished... and we're also back in the Battle Tower proper
         self.state = TowerState.BATTLE_TOWER
@@ -638,6 +650,26 @@ class BattleTowerAgent:
 
 class BattleTowerAAgent(BattleTowerAgent):
     strategy = 'A'
+    # TODO: come up with a different way to store/load this
+    team = """Garchomp @ Focus Sash  
+Ability: Sand Veil  
+EVs: 4 HP / 252 Atk / 252 Spe  
+Jolly Nature  
+- Outrage  
+
+Suicune @ Choice Specs  
+Ability: Pressure  
+EVs: 252 HP / 4 Def / 252 SpA  
+Modest Nature  
+- Surf  
+
+Scizor @ Choice Band  
+Ability: Technician  
+EVs: 252 HP / 252 Atk / 4 SpD  
+Adamant Nature  
+- Bullet Punch  
+
+"""
 
     def _select_and_execute_move(self) -> TowerState:
         move = 0
@@ -675,7 +707,7 @@ class BattleTowerAAgent(BattleTowerAgent):
 
 
 if __name__ == '__main__':
-    agent = BattleTowerAAgent(render=False)
+    agent = BattleTowerAAgent(render=False, db_interface=BattleTowerServerDBInterface())
 
     agent.play()
 

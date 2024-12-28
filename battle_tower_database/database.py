@@ -1,47 +1,14 @@
 import sqlite3
 import datetime
 import os
+import pathlib
 
-DB_PATH = os.path.join('data', 'battle_tower.db')
-
-class BattleTowerDBInterface:
-    """
-    Use this class to interface w/ the Battle Tower database (instead of calling functions or making API calls directly)
-    This class is useful b/c I may want to switch to a Google Cloud VM and I don't want to change the interface
-    """
-
-    battle_num: int = None
-    current_team: str = None
-    current_strategy: int = None
-
-    def on_streak_start(self, team, strategy):
-        self.battle_num = 1 # battles start at 1
-        self.current_team = team
-        self.current_strategy = strategy
-
-    def on_streak_end(self):
-        self.battle_num = None
-        self.current_team = None
-        self.current_strategy = None
-
-    def on_battle_start(self):
-        pass
-
-    def on_battle_end(self, won: bool, duration: int):
-        """Call this when you win/lose the battle, duration is the # of cycles that the battle took to complete"""
-        # TODO: implement checks for the battle num and strategy 'n stuff
-        pass
-
-class BattleTowerServerDBInterface(BattleTowerDBInterface):
-    streak_id: int = None
-
-    def __init__(self, url='127.0.0.1:500'):
-        self.url = url
-
+DATA_DIR = pathlib.Path(__file__).parent.resolve()
+DB_PATH = os.path.join(DATA_DIR, 'battle_tower.db')
 
 # this class was created w/ AI assistance b/c I don't know databases very well (and I *really* don't know SQL)
 class BattleTowerDatabase:
-    def __init__(self, db_name='data/battle_tower.db'):
+    def __init__(self, db_name=DB_PATH):
         self.db_name = db_name
         self.initialize_schema()
 
@@ -68,7 +35,6 @@ class BattleTowerDatabase:
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS streaks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                pokemon_team TEXT,
                 start_timestamp TIMESTAMP,
                 end_timestamp TIMESTAMP
             )
@@ -81,6 +47,7 @@ class BattleTowerDatabase:
                 streak_id INTEGER,
                 battle_number INTEGER,
                 battle_duration INTEGER,
+                pokemon_team TEXT,
                 strategy TEXT,
                 win BOOLEAN,
                 timestamp TIMESTAMP,
@@ -90,25 +57,25 @@ class BattleTowerDatabase:
 
         self._close(conn, cursor)
 
-    def start_streak(self, pokemon_team):
+    def start_streak(self):
         """Starts a new streak and returns the streak ID."""
         conn, cursor = self._connect()
         start_timestamp = datetime.datetime.now()
         cursor.execute(
-            "INSERT INTO streaks (pokemon_team, start_timestamp) VALUES (?, ?)",
-            (pokemon_team, start_timestamp)
+            "INSERT INTO streaks (start_timestamp) VALUES (?)",
+            (start_timestamp, )
         )
         streak_id = cursor.lastrowid
         self._close(conn, cursor)
         return streak_id
 
-    def add_battle(self, streak_id, battle_number, battle_duration, win, strategy):
+    def add_battle(self, streak_id, battle_number, battle_duration, pokemon_team, strategy, win):
         """Adds a battle record to the database."""
         conn, cursor = self._connect()
         timestamp = datetime.datetime.now()
         cursor.execute(
-            "INSERT INTO battles (streak_id, battle_number, battle_duration, strategy, win, timestamp) VALUES (?, ?, ?, ?, ?)",
-            (streak_id, battle_number, battle_duration, strategy, win, timestamp)
+            "INSERT INTO battles (streak_id, battle_number, battle_duration, pokemon_team, strategy, win, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (streak_id, battle_number, battle_duration, pokemon_team, strategy, win, timestamp)
         )
         self._close(conn, cursor)
 
@@ -178,30 +145,31 @@ if __name__ == '__main__':
     db = BattleTowerDatabase()
 
     # Start a new streak
-    streak_id = db.start_streak("Pikachu, Charizard, Blastoise")
+    streak_id = db.start_streak()
     print(f"Started streak with ID: {streak_id}")
 
     # Add a few battle records
-    db.add_battle(streak_id, 1, 120, True)  # Battle 1, Won, duration 120s
-    db.add_battle(streak_id, 2, 150, True)  # Battle 2, Won, duration 150s
-    db.add_battle(streak_id, 3, 100, False)  # Battle 3, Lost, duration 100s
+    pokemon = "Pikachu, Charizard, Blastoise"
+    db.add_battle(streak_id, 1, 120, pokemon, True, 'A')  # Battle 1, Won, duration 120s
+    db.add_battle(streak_id, 2, 150, pokemon, True, 'A')  # Battle 2, Won, duration 150s
+    db.add_battle(streak_id, 3, 100, pokemon, False, 'A')  # Battle 3, Lost, duration 100s
 
     # End a streak
     db.end_streak(streak_id)
     print(f"Ended streak with ID: {streak_id}")
 
     # Example usage with a new streak
-    streak_id = db.start_streak("Pikachu, Snorlax, Gyarados")
-    db.add_battle(streak_id, 1, 200, True)
-    db.add_battle(streak_id, 2, 200, True)
-    db.add_battle(streak_id, 3, 200, True)
-    db.add_battle(streak_id, 4, 200, True)
-    db.add_battle(streak_id, 5, 200, True)
-    db.add_battle(streak_id, 6, 200, True)
-    db.add_battle(streak_id, 7, 200, True)
-    db.add_battle(streak_id, 8, 200, True)
-    db.add_battle(streak_id, 9, 200, True)
-    db.add_battle(streak_id, 10, 200, True)
+    streak_id = db.start_streak()
+    db.add_battle(streak_id, 1, 200, pokemon, True, 'A')
+    db.add_battle(streak_id, 2, 200, pokemon, True, 'A')
+    db.add_battle(streak_id, 3, 200, pokemon, True, 'A')
+    db.add_battle(streak_id, 4, 200, pokemon, True, 'A')
+    db.add_battle(streak_id, 5, 200, pokemon, True, 'A')
+    db.add_battle(streak_id, 6, 200, pokemon, True, 'A')
+    db.add_battle(streak_id, 7, 200, pokemon, True, 'A')
+    db.add_battle(streak_id, 8, 200, pokemon, True, 'A')
+    db.add_battle(streak_id, 9, 200, pokemon, True, 'A')
+    db.add_battle(streak_id, 10, 200, pokemon, True, 'A')
     db.end_streak(streak_id)
 
     # Example usage for statistics
