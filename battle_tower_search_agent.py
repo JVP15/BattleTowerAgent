@@ -13,7 +13,7 @@ from battle_tower_agent import (
     in_battle, ROM_DIR, won_set, lost_set,
 )
 
-from battle_tower_database.interface import BattleTowerDBInterface
+from battle_tower_database.interface import BattleTowerDBInterface, BattleTowerServerDBInterface
 
 DEFAULT_MOVE = 0
 SEARCH_TEAM_SAVESTATE = os.path.join(ROM_DIR, 'Pokemon - Platinum Battle Tower Search Team.dst')
@@ -26,7 +26,7 @@ class BattleTowerSearchSubAgent(BattleTowerAgent):
 
     strategy = 'move_select'
     def __init__(self, savestate_file: str, moves: int | list[int]):
-        super().__init__(render=True, savestate_file=savestate_file)
+        super().__init__(render=False, savestate_file=savestate_file)
 
         if isinstance(moves, int):
             moves = [moves]
@@ -108,6 +108,8 @@ def search_moves(savestate_file: str, moves: list[int], search_queue: Queue) -> 
     Requires the filename (str) and list of moves (ints) to be provided as a tuple b/c of the `map` requirements
     NOTE: this must be called in a new process or else Desmume will complain about already being initialized
     """
+
+    # I don't want any of the logging that the subagent creates, nor the output of desmume
     agent = BattleTowerSearchSubAgent(savestate_file, moves)
 
     state = agent.play_remainder_of_battle()
@@ -137,7 +139,7 @@ def search_moves(savestate_file: str, moves: list[int], search_queue: Queue) -> 
 class BattleTowerSearchAgent(BattleTowerAgent):
 
     def __init__(self,
-        render=True,
+        render=False,
         savestate_file=SEARCH_TEAM_SAVESTATE,
         db_interface: BattleTowerDBInterface = None,
         depth=1,
@@ -151,7 +153,7 @@ class BattleTowerSearchAgent(BattleTowerAgent):
         super().__init__(render, savestate_file, db_interface)
 
         self.depth = depth
-        self.strategy = f'search_depth={depth}'
+        self.strategy = f'search_depth_{depth}'
         if team is None:
             self.team = """Garchomp @ Focus Sash  
 Ability: Sand Veil  
@@ -196,6 +198,8 @@ Adamant Nature
         else:
             raise NotImplementedError("I don't currently have anything for swapping Pokemon yet")
 
+        logger.debug(f'Searching over {possible_moves}')
+
         # to help w/ efficiency (b/c especially early on, it can take a while to 'lose' when you make a bad move; literally PP stalled against Shedinja)
         # as soon as I get the first 'winning' result, we're going with it (this also prioritizes moves that will help us win *fast*)
         search_processes = []
@@ -207,8 +211,10 @@ Adamant Nature
             p.start()
 
         winning_result = None
-        while winning_result is None:
+        completed_processes = 0
+        while winning_result is None and completed_processes < len(search_processes):
             result = result_queue.get(block=True)
+            completed_processes += 1
 
             if result[0]:
                 winning_result = result
@@ -221,9 +227,9 @@ Adamant Nature
 
         if winning_result:
             move = winning_result[1][0] # remember, the result is a tuple of (won, move_list, turns)
-            logger.log(logging.INFO, f'After searching with a depth of {self.depth}, move {move} won in {winning_result[2]} turns')
+            logger.info(f'After searching with a depth of {self.depth}, move {move} won in {winning_result[2]} turns')
         else:
-            logger.log(logging.INFO, f'After searching with a depth of {self.depth}, could not find a winning move. Just picking {DEFAULT_MOVE}')
+            logger.info(f'After searching with a depth of {self.depth}, could not find a winning move. Just picking {DEFAULT_MOVE}')
             move = DEFAULT_MOVE
 
         # it is *technically* possible that no move lead to a win, and that there are also some moves that aren't
@@ -250,7 +256,9 @@ Adamant Nature
         if os.path.exists(savestate_path):
             os.remove(savestate_path)
 
-# Other optimization notes (for speech or accuracy):
+        return state
+
+# Other optimization notes (for speech or accuracy, maybe turn these into slight variations?):
 # 1. Maybe only do a search for the very first turn, but then also re-do the search whenever you have to swap Pokemon
 # 2. For easier battles (e.g. before battle 21) only do search for the first N moves, and then just go from there
 # 3. Don't do *any* search for the first 20 battles b/c there is only a small chance (~10%) that it doesn't get to battle 21
@@ -258,12 +266,10 @@ Adamant Nature
 # 5. Figure out some way to go w/ the 'last used move' instead of the 'default' move (but what about status moves?)
 # 6. Keep track of *how many times* a move led to a win (maybe even re-running the same move combo multiple times) and choosing the 'best' move that way
 # 7. What about random search?
+# 8. BIG OPTIMIZATION: keep the processes alive and more specifically desmume; loading a savestate is pretty quick, but there is a bit of a delay whenever you start up desmume
+# 9. When doing a depth of 2, use *both* moves, don't just use the first move (which means it'll take 2 turns)
 
 if __name__ == '__main__':
-    agent = BattleTowerSearchAgent(render=True)
+    agent = BattleTowerSearchAgent(render=True, depth=1, db_interface=BattleTowerServerDBInterface())
 
     agent.play()
-
-    # path = r'C:\Users\jorda\Documents\Python\CynthAI\GeminiPlaysPokemon\ROM\search\36522603ecd64c519d1bb6b5495b29fb.dst'
-    # subagent = BattleTowerSearchSubAgent(path, [3, 0])
-    # subagent.play_remainder_of_battle()
