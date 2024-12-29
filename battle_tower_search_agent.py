@@ -1,6 +1,7 @@
+import logging
 import os
 import uuid
-from multiprocessing import Pool
+from multiprocessing import Pool, Queue, Process
 
 import numpy as np
 
@@ -14,9 +15,11 @@ from battle_tower_agent import (
 
 from battle_tower_database.interface import BattleTowerDBInterface
 
-DEFAULT_MOVE = 1
+DEFAULT_MOVE = 0
 SEARCH_TEAM_SAVESTATE = os.path.join(ROM_DIR, 'Pokemon - Platinum Battle Tower Search Team.dst')
 SEARCH_TMP_SAVESTATE_DIR = os.path.join(ROM_DIR, 'search')
+
+logger = logging.getLogger('SearchTowerAgent')
 
 class BattleTowerSearchSubAgent(BattleTowerAgent):
     """This class is used by the BattleTowerSearchAgent to 'look ahead' for the next possible moves"""
@@ -58,7 +61,7 @@ class BattleTowerSearchSubAgent(BattleTowerAgent):
         #  want to search over, we go back to using the 'default' move (i.e. the first one, which is as we saw with the 'A' agent, is pretty solid)
         state = self.state
 
-        if self.moves < len(self.moves):
+        if self.move_idx < len(self.moves):
             move = self.moves[self.move_idx]
         else:
             move = DEFAULT_MOVE
@@ -98,15 +101,13 @@ class BattleTowerSearchSubAgent(BattleTowerAgent):
 
         return state
 
-def search_moves(file_move_tuple: tuple[str, list[int]]) -> tuple[bool, list[int], int]:
+def search_moves(savestate_file: str, moves: list[int], search_queue: Queue) -> tuple[bool, list[int], int]:
     """
     Given the savestate file, plays the remainder of the game until it reaches a stopping point.
-    Returns a bool if the game was won (true if it won, false if it lost or stopped early), the move list, and also the # of turns played out
+    Adds the result (a bool if the game was won (true if it won, false if it lost or stopped early), the move list, and also the # of turns played out) to the provided multiprocessing queue
     Requires the filename (str) and list of moves (ints) to be provided as a tuple b/c of the `map` requirements
     NOTE: this must be called in a new process or else Desmume will complain about already being initialized
     """
-    savestate_file, moves = file_move_tuple[0], file_move_tuple[1]
-
     agent = BattleTowerSearchSubAgent(savestate_file, moves)
 
     state = agent.play_remainder_of_battle()
@@ -131,7 +132,7 @@ def search_moves(file_move_tuple: tuple[str, list[int]]) -> tuple[bool, list[int
         agent._log_error_image('subagent_post_battle_loop', state)
         raise ValueError("This *really* shouldn't happen, but somehow the state is", state, "after searching through moves")
 
-    return won, moves, agent.move_idx
+    search_queue.put((won, moves, agent.move_idx))
 
 class BattleTowerSearchAgent(BattleTowerAgent):
 
@@ -184,7 +185,7 @@ Adamant Nature
         # TODO: investigate early stopping methods, such as when we find a move combo that leads to a win,
         #   may only need to run 1-2 more simulations from there to make sure we win
         savestate_file = uuid.uuid4().hex + '.dst'
-        savestate_path = os.path.join(SEARCH_TMP_SAVESTATE_DIR)
+        savestate_path = os.path.join(SEARCH_TMP_SAVESTATE_DIR, savestate_file)
         self.env.emu.savestate.save_file(savestate_path)
 
         state = self.state
@@ -192,27 +193,41 @@ Adamant Nature
             possible_moves = [[move] for move in range(POKEMON_MAX_MOVES)]
         elif self.depth == 2:
             possible_moves = [[first, second] for first in range(POKEMON_MAX_MOVES) for second in range(POKEMON_MAX_MOVES)]
-        if self.depth >= 3:
+        else:
             raise NotImplementedError("I don't currently have anything for swapping Pokemon yet")
 
-        search_args = [(savestate_file, move_list) for move_list in possible_moves]
+        # to help w/ efficiency (b/c especially early on, it can take a while to 'lose' when you make a bad move; literally PP stalled against Shedinja)
+        # as soon as I get the first 'winning' result, we're going with it (this also prioritizes moves that will help us win *fast*)
+        search_processes = []
+        result_queue = Queue()
 
-        # TODO: investigate terminating processes early when we find a strategy that works
-        with Pool() as p:
-            search_results = p.map(search_moves, search_args)
+        for move_list in possible_moves:
+            p = Process(target=search_moves, args=(savestate_path, move_list, result_queue))
+            search_processes.append(p)
+            p.start()
 
-        wins_per_move = [0] * POKEMON_MAX_MOVES
+        winning_result = None
+        while winning_result is None:
+            result = result_queue.get(block=True)
 
-        for result in search_results:
-            move_choice = result[1][0]
-            won_battle = result[0]
-            wins_per_move[move_choice] += won_battle
+            if result[0]:
+                winning_result = result
 
-        # in case of a tie, np returns the first occurance, so if all moves win or no moves win, we will go w/ the default move (i.e. 0)
-        move = np.argmax(wins_per_move)
+                for p in search_processes:
+                    p.terminate()
+
+        for p in search_processes: # multiprocessing thing; to prevent threads from becoming zombies, we join
+            p.join()
+
+        if winning_result:
+            move = winning_result[1][0] # remember, the result is a tuple of (won, move_list, turns)
+            logger.log(logging.INFO, f'After searching with a depth of {self.depth}, move {move} won in {winning_result[2]} turns')
+        else:
+            logger.log(logging.INFO, f'After searching with a depth of {self.depth}, could not find a winning move. Just picking {DEFAULT_MOVE}')
+            move = DEFAULT_MOVE
 
         # it is *technically* possible that no move lead to a win, and that there are also some moves that aren't
-        #  possible to make, so we still have to do this whole thing *just in case* (see the AAgent for a detailed explaination of *why*)
+        #  possible to make, so we still have to do this whole thing *just in case* (see `AAgent` for more info about trying moves)
         advanced_game = False
         for i in range(POKEMON_MAX_MOVES):
             chosen_move = move + i
@@ -235,7 +250,20 @@ Adamant Nature
         if os.path.exists(savestate_path):
             os.remove(savestate_path)
 
+# Other optimization notes (for speech or accuracy):
+# 1. Maybe only do a search for the very first turn, but then also re-do the search whenever you have to swap Pokemon
+# 2. For easier battles (e.g. before battle 21) only do search for the first N moves, and then just go from there
+# 3. Don't do *any* search for the first 20 battles b/c there is only a small chance (~10%) that it doesn't get to battle 21
+# 4. After receiving the 1st win, keep searching for either first_sample time * DURATION_MOD, or wait for N more wins and then just go w/ 'default' move
+# 5. Figure out some way to go w/ the 'last used move' instead of the 'default' move (but what about status moves?)
+# 6. Keep track of *how many times* a move led to a win (maybe even re-running the same move combo multiple times) and choosing the 'best' move that way
+# 7. What about random search?
+
 if __name__ == '__main__':
     agent = BattleTowerSearchAgent(render=True)
 
     agent.play()
+
+    # path = r'C:\Users\jorda\Documents\Python\CynthAI\GeminiPlaysPokemon\ROM\search\36522603ecd64c519d1bb6b5495b29fb.dst'
+    # subagent = BattleTowerSearchSubAgent(path, [3, 0])
+    # subagent.play_remainder_of_battle()
