@@ -81,10 +81,13 @@ class BattleTowerSearchSubAgent(BattleTowerAgent):
             self._general_button_press('A')
             state = self._wait_for_battle_states()
 
-            # if clicking on one of the moves that we're exploring didn't advance the game
-            #   there is no point in continuing to search down that path
+            # if clicking on one of the moves that *we're exploring* (not the 'default' move after the fact b/c of choice or encore or whatever)
+            #   didn't advance the game there is no point in continuing to search down that path so we raise an error
+            # NOTE: make sure we catch this error elsewhere
+            # TODO: maybe come up with a better way to completely escape from the battle loop?
             if state == TowerState.MOVE_SELECT and self.move_idx < len(self.moves):
-                return state
+                logger.debug(f"Attempted to search over move {chosen_move} but it could not be chosen; stopping search.")
+                raise ValueError() # TODO: come up with another error type?
 
             # any other state but MOVE_SELECT means that the move 'worked' (i.e. advanced the game)
             elif state != TowerState.MOVE_SELECT:
@@ -112,13 +115,20 @@ def search_moves(savestate_file: str, moves: list[int], search_queue: Queue) -> 
     # I don't want any of the logging that the subagent creates, nor the output of desmume
     agent = BattleTowerSearchSubAgent(savestate_file, moves)
 
-    state = agent.play_remainder_of_battle()
-
+    try:
+        state = agent.play_remainder_of_battle()
+    except:
+        # by default when searching, if we run into an error, I want to set it to a loss
+        # this will most likely happen if we are using a choice item or torment and try to select an invalid move
+        state = TowerState.LOST_SET
     if state == TowerState.WON_BATTLE:
         won = True
+    elif state == TowerState.LOST_SET:
+        won = False
     # if we chose a move and got thrown back to move_select, it means we couldn't choose that move so we should just stop the search
     elif state == TowerState.MOVE_SELECT:
         won = False
+        print('...wait I *am* being called correctly!')
     elif state == TowerState.END_OF_SET:
         state = agent._wait_for(
             (won_set, TowerState.WON_SET),
