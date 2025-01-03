@@ -57,9 +57,8 @@ class PokemonEnv():
 
     def load_savestate(self, savestate_file):
         self.emu.savestate.load_file(savestate_file)
-        self.emu.savestate
 
-    def step(self, action: str | None = None):
+    def step(self, action: str | None = None) -> np.ndarray:
         # it's just easier to clear all of the keys first and then set the ones we want instead of trying to figure out which ones are already set
         self.emu.input.keypad_rm_key(Keys.NO_KEY_SET)
 

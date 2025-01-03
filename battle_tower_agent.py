@@ -259,9 +259,8 @@ class BattleTowerAgent:
 
     def reset(self):
         self.current_streak = 0
-        self.cur_frame = None
         self.env.reset()
-        self.env.step(None)
+        self.cur_frame = self.env.step(None)
 
     def play(self):
 
@@ -707,102 +706,102 @@ Adamant Nature
 
 
 if __name__ == '__main__':
-    agent = BattleTowerAAgent(render=False, db_interface=BattleTowerServerDBInterface())
+    # agent = BattleTowerAAgent(render=True, db_interface=BattleTowerServerDBInterface())
+    #
+    # agent.play()
 
-    agent.play()
+    from pokemon_env import *
+    import keyboard
+    import win32api
+    import win32gui
+    import time
 
-    # from pokemon_env import *
-    # import keyboard
-    # import win32api
-    # import win32gui
-    # import time
-    #
-    # emu = DeSmuME()
-    # emu.open(ROM_FILE)
-    # emu.savestate.load_file('ROM\Pokemon - Platinum Battle Tower.dst')
-    # # emu.savestate.load_file('ROM\\14 Win Streak.dst')
-    # emu.volume_set(0)
-    #
-    #
-    # # Create the window for the emulator
-    # window = emu.create_sdl_window()
-    #
-    # # Get handle for desmume sdl window
-    # window_handle = win32gui.FindWindow(None, "Desmume SDL")
-    #
-    # checks = [
-    #     is_dialog_box,
-    #     is_save_dialog,
-    #     is_save_overwrite_dialog,
-    #     in_pokemon_select,
-    #     is_ready_for_battle_tower,
-    #     pokemon_is_fainted,
-    #     in_battle,
-    #     is_next_opponent_box,
-    #     won_set,
-    #     at_save_battle_video,
-    #     lost_set,
-    #     in_move_select,
-    # ]
-    #
-    # CONTROLS = {
-    #     "enter": Keys.KEY_START,
-    #     "right shift": Keys.KEY_SELECT,
-    #     "q": Keys.KEY_L,
-    #     "w": Keys.KEY_R,
-    #     "a": Keys.KEY_Y,
-    #     "s": Keys.KEY_X,
-    #     "x": Keys.KEY_A,
-    #     "z": Keys.KEY_B,
-    #     "up": Keys.KEY_UP,
-    #     "down": Keys.KEY_DOWN,
-    #     "right": Keys.KEY_RIGHT,
-    #     "left": Keys.KEY_LEFT,
-    # }
-    # while not window.has_quit():
-    #     # Check if any buttons are pressed and process them
-    #     # I like to just whipe all keys first so that I don't have to worry about removing keys or whatnot
-    #     emu.input.keypad_rm_key(Keys.NO_KEY_SET)
-    #
-    #     for key, emulated_button in CONTROLS.items():
-    #         if keyboard.is_pressed(key):
-    #             emu.input.keypad_add_key(keymask(emulated_button))
-    #         else:
-    #             emu.input.keypad_rm_key(keymask(emulated_button))
-    #
-    #     screen_buffer = emu.display_buffer_as_rgbx()
-    #     screen_pixels = np.frombuffer(screen_buffer, dtype=np.uint8)
-    #     screen = screen_pixels[:SCREEN_PIXEL_SIZE_BOTH * 4]
-    #     screen = screen.reshape((SCREEN_HEIGHT_BOTH, SCREEN_WIDTH, 4))[..., :3]  # drop the alpha channel
-    #
-    #     if keyboard.is_pressed('t'):
-    #         image_path = os.path.join('images', 'Decision Making', input('Enter image path:') + '.PNG')
-    #
-    #         cv2.imwrite(image_path, screen)
-    #
-    #     # Check if touch screen is pressed and process it
-    #     if win32api.GetKeyState(0x01) < 0:
-    #         # Get coordinates of click relative to desmume window
-    #         x, y = win32gui.ScreenToClient(window_handle, win32gui.GetCursorPos())
-    #         # Adjust y coord to account for clicks on top (non-touch) screen
-    #         y -= SCREEN_HEIGHT
-    #
-    #         if x in range(0, SCREEN_WIDTH) and y in range(0, SCREEN_HEIGHT):
-    #             emu.input.touch_set_pos(x, y)
-    #         else:
-    #             emu.input.touch_release()
-    #     else:
-    #         emu.input.touch_release()
-    #
-    #     for check in checks:
-    #         if check(screen):
-    #             print(f'{check.__name__}: {check(screen)}')
-    #
-    #     if pokemon_is_fainted(screen):
-    #         print(get_party_status(screen))
-    #
-    #     if is_next_opponent_box(screen):
-    #         print('Next opp:', get_battle_number(screen))
-    #
-    #     emu.cycle()
-    #     window.draw()
+    emu = DeSmuME()
+    emu.open(ROM_FILE)
+    emu.savestate.load_file('ROM\Pokemon - Platinum Battle Tower Search Team.dst')
+    # emu.savestate.load_file('ROM\\14 Win Streak.dst')
+    emu.volume_set(0)
+
+
+    # Create the window for the emulator
+    window = emu.create_sdl_window()
+
+    # Get handle for desmume sdl window
+    window_handle = win32gui.FindWindow(None, "Desmume SDL")
+
+    checks = [
+        is_dialog_box,
+        is_save_dialog,
+        is_save_overwrite_dialog,
+        in_pokemon_select,
+        is_ready_for_battle_tower,
+        pokemon_is_fainted,
+        in_battle,
+        is_next_opponent_box,
+        won_set,
+        at_save_battle_video,
+        lost_set,
+        in_move_select,
+    ]
+
+    CONTROLS = {
+        "enter": Keys.KEY_START,
+        "right shift": Keys.KEY_SELECT,
+        "q": Keys.KEY_L,
+        "w": Keys.KEY_R,
+        "a": Keys.KEY_Y,
+        "s": Keys.KEY_X,
+        "x": Keys.KEY_A,
+        "z": Keys.KEY_B,
+        "up": Keys.KEY_UP,
+        "down": Keys.KEY_DOWN,
+        "right": Keys.KEY_RIGHT,
+        "left": Keys.KEY_LEFT,
+    }
+    while not window.has_quit():
+        # Check if any buttons are pressed and process them
+        # I like to just whipe all keys first so that I don't have to worry about removing keys or whatnot
+        emu.input.keypad_rm_key(Keys.NO_KEY_SET)
+
+        for key, emulated_button in CONTROLS.items():
+            if keyboard.is_pressed(key):
+                emu.input.keypad_add_key(keymask(emulated_button))
+            else:
+                emu.input.keypad_rm_key(keymask(emulated_button))
+
+        screen_buffer = emu.display_buffer_as_rgbx()
+        screen_pixels = np.frombuffer(screen_buffer, dtype=np.uint8)
+        screen = screen_pixels[:SCREEN_PIXEL_SIZE_BOTH * 4]
+        screen = screen.reshape((SCREEN_HEIGHT_BOTH, SCREEN_WIDTH, 4))[..., :3]  # drop the alpha channel
+
+        if keyboard.is_pressed('t'):
+            image_path = os.path.join('images', 'Decision Making', input('Enter image path:') + '.PNG')
+
+            cv2.imwrite(image_path, screen)
+
+        # Check if touch screen is pressed and process it
+        if win32api.GetKeyState(0x01) < 0:
+            # Get coordinates of click relative to desmume window
+            x, y = win32gui.ScreenToClient(window_handle, win32gui.GetCursorPos())
+            # Adjust y coord to account for clicks on top (non-touch) screen
+            y -= SCREEN_HEIGHT
+
+            if x in range(0, SCREEN_WIDTH) and y in range(0, SCREEN_HEIGHT):
+                emu.input.touch_set_pos(x, y)
+            else:
+                emu.input.touch_release()
+        else:
+            emu.input.touch_release()
+
+        for check in checks:
+            if check(screen):
+                print(f'{check.__name__}: {check(screen)}')
+
+        if pokemon_is_fainted(screen):
+            print(get_party_status(screen))
+
+        if is_next_opponent_box(screen):
+            print('Next opp:', get_battle_number(screen))
+
+        emu.cycle()
+        window.draw()

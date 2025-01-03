@@ -21,6 +21,9 @@ SEARCH_TMP_SAVESTATE_DIR = os.path.join(ROM_DIR, 'search')
 
 logger = logging.getLogger('SearchTowerAgent')
 
+class InvalidMoveSelected(Exception):
+    pass
+
 class BattleTowerSearchSubAgent(BattleTowerAgent):
     """This class is used by the BattleTowerSearchAgent to 'look ahead' for the next possible moves"""
 
@@ -87,7 +90,7 @@ class BattleTowerSearchSubAgent(BattleTowerAgent):
             # TODO: maybe come up with a better way to completely escape from the battle loop?
             if state == TowerState.MOVE_SELECT and self.move_idx < len(self.moves):
                 logger.debug(f"Attempted to search over move {chosen_move} but it could not be chosen; stopping search.")
-                raise ValueError() # TODO: come up with another error type?
+                raise InvalidMoveSelected()
 
             # any other state but MOVE_SELECT means that the move 'worked' (i.e. advanced the game)
             elif state != TowerState.MOVE_SELECT:
