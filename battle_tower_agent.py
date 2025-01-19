@@ -212,7 +212,7 @@ def get_party_status(frame):
     return ~fainted_status
 
 class TowerState(Enum):
-
+    WAITING = 0
     LOBBY = 1
     POKEMON_SELECT = 2
     BATTLE_TOWER = 3
@@ -225,6 +225,7 @@ class TowerState(Enum):
     END_OF_SET = 101
     WON_SET = 102
     LOST_SET = 103
+
 
 
 

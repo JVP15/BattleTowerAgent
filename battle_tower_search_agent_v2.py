@@ -1,7 +1,7 @@
 import logging
 import os
 import uuid
-from multiprocessing import Pool, Queue, Process
+from multiprocessing import Pool, Queue, Process, Value
 
 import numpy as np
 
@@ -13,10 +13,11 @@ from battle_tower_agent import (
     NUM_POKEMON_IN_SINGLES,
     in_battle,
     ROM_DIR,
+    check_key_pixels,
     won_set,
     lost_set,
     pokemon_is_fainted,
-    get_party_status,
+    get_party_status, in_move_select, is_next_opponent_box, at_save_battle_video,
 )
 
 from battle_tower_search_agent import InvalidMoveSelected
@@ -28,8 +29,26 @@ SEARCH_TEAM_SAVESTATE = os.path.join(ROM_DIR, 'Pokemon - Platinum Battle Tower S
 SEARCH_TMP_SAVESTATE_DIR = os.path.join(ROM_DIR, 'search')
 
 logger = logging.getLogger('SearchTowerAgent')
+logging.basicConfig(level=logging.DEBUG)
 
 HP_PER_POKEMON = 100
+
+def opp_pokemon_is_out(frame):
+    """
+    This function checks whether the opponent's pokemon is fully out (i.e. that we're in battle,
+    there is a name/HP bar, and that it isn't fainted/we're waiting for the next pokemon
+    """
+    # There's no good "one" check for the opp's bar, so I am checking various key pixels
+    # (mostly at the far right b/c the name bar slides to the left when a pokemon faints)
+    key_pixels = [
+        ((44, 117), (40, 48, 40)), # far right sticking out dark pixel in the HP arrow bar
+        ((45, 120), (96, 72, 56)), # far right sticking out slightly brigher pixel in arrow bar
+        ((22, 108), (40, 48, 40)), # upper right gray corner of opp pkmn box
+        ((50, 108), (40, 48, 40)), # lower right gray corner of opp pkmn box
+    ]
+
+    return check_key_pixels(frame, key_pixels)
+
 
 def get_opponent_hp_bar(frame):
     """This gets the opponent's Pokemon's current HP (as an integer from 0s to 100)"""
@@ -54,12 +73,44 @@ def get_opponent_pokemon_name(frame):
 class SwappedPokemon(Exception):
     pass
 
+
+class HPWatcher:
+    # NOTE: this class is reliant on the fact that each Pkmn on the foes team is unique b/c of the way it tracks pokemon switches
+    def __init__(self, damage_value: Value = None):
+        self.opp_hp = None
+        self.damage_dealt = 0
+        self.opp_pkm = None
+
+        # this is an optional multiprocessing value useful for keeping track of every search agent
+        self.damage_value = damage_value
+
+    def __call__(self, cur_frame):
+        if opp_pokemon_is_out(cur_frame):
+            opp_hp = get_opponent_hp_bar(cur_frame)
+            opp_pkmn = get_opponent_pokemon_name(cur_frame)
+
+            if self.opp_pkm is None or (opp_pkmn != self.opp_pkm).any():
+                self.opp_pkm = opp_pkmn
+                self.opp_hp = opp_hp
+            else:
+                hp_diff = self.opp_hp - opp_hp
+                self.damage_dealt += hp_diff
+                self.opp_hp = opp_hp
+
+                # minor optimization; HP changes every, say, 3 frames, so we don't need to acquire the lock if the opp's HP doesn't change this frame
+                if self.damage_value is not None and hp_diff != 0:
+                    with self.damage_value.get_lock():
+                        self.damage_value.value += hp_diff
+
+        # since we're kinda hacking `wait_for`, it needs to return a bool to indicate that the check failed
+        return False
+
 class BattleTowerSearchV2SubAgent(BattleTowerAgent):
     """This class is used by the BattleTowerSearchAgent to 'look ahead' for the next possible moves"""
 
     strategy = 'move_select'
-    def __init__(self, savestate_file: str, moves: int | list[int], swap_to: int | None = None):
-        super().__init__(render=True, savestate_file=savestate_file)
+    def __init__(self, savestate_file: str, moves: int | list[int], swap_to: int | None = None, damage_value: Value = None):
+        super().__init__(render=False, savestate_file=savestate_file)
 
         if isinstance(moves, int):
             moves = [moves]
@@ -69,12 +120,7 @@ class BattleTowerSearchV2SubAgent(BattleTowerAgent):
         self.team = '' # there is no logging to a DB for these searches, so we don't need to specify a teams
         self.swap_to = swap_to
 
-        self.opp_hp = None
-        self.damage_dealt = 0
-        # I'm going to track when a pokemon faints by it's name; if it's any different, it means the opponent lost a Pokemon
-        # TODO: *technically* breaks if the opponent uses U-turn but... I think it's fine
-        # NOTE: it also is reliant on the fact that each Pkmn on the foes team is unique
-        self.opp_pkmn = None
+        self.hp_watcher = HPWatcher(damage_value=damage_value)
 
     def play_remainder_of_battle(self) -> TowerState:
         """
@@ -103,34 +149,28 @@ class BattleTowerSearchV2SubAgent(BattleTowerAgent):
         )
         return super()._run_battle_loop()
 
+    def _wait_for_battle_states(self):
+        """
+        Whenever we're in a battle, these are the possible states we could reach after clicking any move
+        This is a special case of _wait_for that we'll tend to use in the battle loop
+        """
+        return self._wait_for(
+            (self.hp_watcher, TowerState.WAITING), # NOTE: I'm doing this *before* any other checks b/c once a check is found, no other checks are run
+            (in_battle, TowerState.BATTLE),
+            (in_move_select, TowerState.MOVE_SELECT),
+            (pokemon_is_fainted, TowerState.SWAP_POKEMON),
+            (is_next_opponent_box, TowerState.WON_BATTLE),
+            (at_save_battle_video, TowerState.END_OF_SET),
+            button_press='A',
+            # since we need some more advanced logic, I don't want anything advancing automatically
+            # NOTE: DON'T CHANGE THIS OR ELSE IT CAUSES A REALLY TRICKY BUG WHEN WAITING FOR BOTH BATTLE AND MOVE_SELECT
+            check_first=True,
+        )
+
     def _select_and_execute_move(self) -> TowerState:
         # The search subagent starts by making each move in-order, and once we've gotten past the moves that we
         #  want to search over, we go back to using the 'default' move (i.e. the first one, which is as we saw with the 'A' agent, is pretty solid)
         state = self.state
-
-        # to determine if we did damage, we check the opponent's HP at the beginning of every turn
-        #   and if it's different than when we chedked on the previous turn, we did damage (or they healed and we did negative damage...)
-        #  If the Pokemon is different, we can assume that we ko'd them, which means we did whatever their remaining HP was
-        #  NOTE: this doesn't track properly w/ U-turn and opponent switching moves but it's the best I have right now
-        #  TODO: make this also work w/ entry hazards... ALSO OUTRAGE!
-        opp_hp = get_opponent_hp_bar(self.cur_frame)
-        opp_pkmn = get_opponent_pokemon_name(self.cur_frame)
-        kod_opp = False
-
-        if self.opp_hp is None:
-            self.opp_hp = opp_hp
-
-        if self.opp_pkmn is None:
-            self.opp_pkmn = opp_pkmn
-        elif (self.opp_pkmn != opp_pkmn).any(): # for future self, use any here instead of all (duh)
-            kod_opp = True
-            print('KOd previous Pokemon')
-
-        if kod_opp: # for future self: if we ko an opponent, the next opponent will have at least as much health
-            self.damage_dealt += self.opp_hp
-        else:
-            self.damage_dealt += self.opp_hp - opp_hp
-        print('Total Damage Dealt', self.damage_dealt)
 
         if self.move_idx < len(self.moves):
             move = self.moves[self.move_idx]
@@ -154,13 +194,12 @@ class BattleTowerSearchV2SubAgent(BattleTowerAgent):
 
             # if clicking on one of the moves that *we're exploring* (not the 'default' move after the fact b/c of choice or encore or whatever)
             #   didn't advance the game there is no point in continuing to search down that path so we raise an error
-            # NOTE: make sure we catch this error elsewhere
-            # TODO: maybe come up with a better way to completely escape from the battle loop?
+            # NOTE: make sure we catch these error elsewhere
             if state == TowerState.MOVE_SELECT and self.move_idx < len(self.moves):
                 logger.debug(f"Attempted to search over move {chosen_move} but it could not be chosen; stopping search.")
                 raise InvalidMoveSelected()
             elif state == TowerState.SWAP_POKEMON:
-                logger.debug(f'Finished move search by swapping Pokemon. Current Pokemon did {self.damage_dealt} damage.')
+                logger.debug(f'Finished move search by swapping Pokemon. Current Pokemon did {self.hp_watcher.damage_dealt} damage.')
                 raise SwappedPokemon()
             # any other state but MOVE_SELECT means that the move 'worked' (i.e. advanced the game)
             elif state != TowerState.MOVE_SELECT:
@@ -177,29 +216,29 @@ class BattleTowerSearchV2SubAgent(BattleTowerAgent):
 
         return state
 
-def search_moves(savestate_file: str, moves: list[int], search_queue: Queue) -> tuple[bool, list[int], int]:
+def search_moves(savestate_file: str, moves: list[int], search_queue: Queue, damage_value: Value):
     """
     Given the savestate file, plays the remainder of the game until it reaches a stopping point.
-    Adds the result (a bool if the game was won (true if it won, false if it lost or stopped early), the move list, and also the # of turns played out) to the provided multiprocessing queue
-    Requires the filename (str) and list of moves (ints) to be provided as a tuple b/c of the `map` requirements
+    It continuously updates the damage dealt value provided, even while the battle is still ongoing
+    Adds the result (if we won the battle yet, total damage dealt after the search stops, the move list, and also the # of turns played out) to the provided multiprocessing queue
     NOTE: this must be called in a new process or else Desmume will complain about already being initialized
     """
 
-    agent = BattleTowerSearchV2SubAgent(savestate_file, moves)
+    agent = BattleTowerSearchV2SubAgent(savestate_file, moves, damage_value=damage_value)
 
     try:
         state = agent.play_remainder_of_battle()
-    except:
-        # by default when searching, if we run into an error, I want to set it to a loss
-        # this will most likely happen if we are using a choice item or torment and try to select an invalid move
+    except InvalidMoveSelected: #  this means we were unable to select a move in the search so we should just stop the search
         state = TowerState.LOST_SET
+    except SwappedPokemon: # this means we stopped the search early due to a pokemon fainting so we stopped the search early
+        state = TowerState.LOST_SET
+    except: # NOTE: I'm listing out the above errors even though it doesn't change stuff b/c I want to remember what I did for later
+        state = TowerState.LOST_SET
+
+    won = False
+
     if state == TowerState.WON_BATTLE:
         won = True
-    elif state == TowerState.LOST_SET:
-        won = False
-    # if we chose a move and got thrown back to move_select, it means we couldn't choose that move so we should just stop the search
-    elif state == TowerState.MOVE_SELECT:
-        won = False
     elif state == TowerState.END_OF_SET:
         state = agent._wait_for(
             (won_set, TowerState.WON_SET),
@@ -209,13 +248,11 @@ def search_moves(savestate_file: str, moves: list[int], search_queue: Queue) -> 
 
         if state == TowerState.WON_SET:
             won = True
-        else:
-            won = False
-    else:
-        agent._log_error_image('subagent_post_battle_loop', state)
-        raise ValueError("This *really* shouldn't happen, but somehow the state is", state, "after searching through moves")
 
-    search_queue.put((won, moves, agent.move_idx))
+    with damage_value.get_lock():
+        damage_dealt = damage_value.value
+
+    search_queue.put((won, damage_dealt, moves, agent.move_idx))
 
 class BattleTowerSearchV2Agent(BattleTowerAgent):
 
@@ -234,10 +271,13 @@ class BattleTowerSearchV2Agent(BattleTowerAgent):
           * [OPTIONAL] if there is no winning move, try swapping to a different Pokemon and seeing how effective it is w/ search_depth=1
         2. Whenever we swap, if there are two options, do a search for each of them
           * [IMPLEMENTATION] search_whatever can have the move combo and also swap=None, 1, or 2
-        3. Instead of waiting for the current Pokemon to faint everytime, we could do what we do in the v1 agent and just stop on the first return
-          but that kinda defeats the purpose of tracking the HP bar doesn't it? Here's a compromise:
-          * Wait for 2-3 out of the 4 options and choose the one that deals the most damage; chances are that there will always be a 4th option that takes a while to complete
-
+        3. We may stop searching before all moves have been fully searched. Whenever a search returns, we check:
+          1. If that search won the battle, we immediately stop.
+          2. If that search didn't win the battle, we check whether it is the highest-damaging search *at that wall-clock time of the search*
+             * If that move's damage is higher than anything else at that point, we stop searching and go with it
+             * Otherwise, we keep waiting.
+             * It's possible that a different move will lead to a larger damage overall, just take more time,
+               but w/ the current moveset of each Pokemon, that's unlikely (in a sense, it's a tradeoff of time vs accuracy)
 
         depth is how many combinations of moves that we'll try, although it's more like a class than an actual # of steps we'll go down the tree
         If depth is 1 or 2, it's all possible permutations of move 1 or 2 nodes down the tree. If depth is 3, we also include swapping Pokemon
@@ -287,7 +327,7 @@ Adamant Nature
             possible_moves = [[first, second] for first in range(POKEMON_MAX_MOVES) for second in range(POKEMON_MAX_MOVES)]
         else:
             raise NotImplementedError("I don't currently have anything for swapping Pokemon yet")
-        possible_moves = [[3]]
+
         logger.debug(f'Searching over {possible_moves}')
 
         # to help w/ efficiency (b/c especially early on, it can take a while to 'lose' when you make a bad move; literally PP stalled against Shedinja)
@@ -295,32 +335,65 @@ Adamant Nature
         search_processes = []
         result_queue = Queue()
 
-        for move_list in possible_moves:
-            p = Process(target=search_moves, args=(savestate_path, move_list, result_queue))
+        damage_values = [Value('i', 0) for _ in range(len(possible_moves))]
+
+        def damage_argmax():
+            max_idx = -1
+            max_value = -np.inf
+            for i, v in enumerate(damage_values):
+                with v.get_lock():
+                    if v.value > max_value:
+                        max_value = v.value
+                        max_idx = i
+
+            return max_idx, max_value
+
+        for i, move_list in enumerate(possible_moves):
+            p = Process(target=search_moves, args=(savestate_path, move_list, result_queue, damage_values[i]))
             search_processes.append(p)
             p.start()
 
-        winning_result = None
+        best_result = None
         completed_processes = 0
-        while winning_result is None and completed_processes < len(search_processes):
+        while best_result is None and completed_processes < len(search_processes):
             result = result_queue.get(block=True)
             completed_processes += 1
 
-            if result[0]:
-                winning_result = result
+            won_battle = result[0]
+            if won_battle:
+                best_result = result
+                logger.debug('Found a winning move, stopping early.')
+            else:
+                damage_dealt = result[1]
 
-                for p in search_processes:
-                    p.terminate()
+                _, max_damage = damage_argmax()
+
+                if damage_dealt >= max_damage: # if we're as good or better than any other search at this very moment, we can stop early
+                    best_result = result
+                    logger.debug('Stopping early b/c we found a move that is the best so far.')
+
+        if best_result is not None:
+            for p in search_processes:
+                p.terminate()
 
         for p in search_processes: # multiprocessing thing; to prevent threads from becoming zombies, we join
             p.join()
 
-        if winning_result:
-            move = winning_result[1][0] # remember, the result is a tuple of (won, move_list, turns)
-            logger.info(f'After searching with a depth of {self.depth}, move {move} won in {winning_result[2]} turns')
+        logger.debug(f'Damage values at the end of the search: {[v.value for v in damage_values]}')
+
+        if best_result:
+            move = best_result[2][0] # remember, the result is a tuple of (won, damage, move_list, turns)
+            logger.info(f'After searching with a depth of {self.depth}, move {move} did {best_result[1]} damage in {best_result[3]} turns'
+                        + ' and lead to a win.' if best_result[0] else '.')
         else:
-            logger.info(f'After searching with a depth of {self.depth}, could not find a winning move. Just picking {DEFAULT_MOVE}')
-            move = DEFAULT_MOVE
+            # okay it's highly unlikely, but technically possible, that we don't get a best_result from the above search
+            # if, e.g. the last search move had done the most amount of damage when all other searches terminated, but then the opponent healed
+            #  and so it did less final damage
+            max_idx, max_damage = damage_argmax()
+            move = possible_moves[max_idx][0]
+            logger.info(f'After exhausting all searches with a depth of {self.depth}, '
+                        f'got into a rare situation where no best move was initially found. '
+                        f'Choosing move {move}, which lead to {max_damage} damage dealt.')
 
         # it is *technically* possible that no move lead to a win, and that there are also some moves that aren't
         #  possible to make, so we still have to do this whole thing *just in case* (see `AAgent` for more info about trying moves)
