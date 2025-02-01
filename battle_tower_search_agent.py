@@ -68,6 +68,8 @@ class BattleTowerSearchSubAgent(BattleTowerAgent):
         else:
             move = DEFAULT_MOVE
 
+        self.move_idx += 1
+
         return move
 
 def search_moves(savestate_file: str, moves: list[int], search_queue: Queue) -> tuple[bool, list[int], int]:

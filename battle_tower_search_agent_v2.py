@@ -187,49 +187,18 @@ class BattleTowerSearchV2SubAgent(BattleTowerAgent):
             check_first=True,
         )
 
-    def _select_move(self) -> TowerState:
+    def _select_move(self) -> int:
         # The search subagent starts by making each move in-order, and once we've gotten past the moves that we
         #  want to search over, we go back to using the 'default' move (i.e. the first one, which is as we saw with the 'A' agent, is pretty solid)
-        state = self.state
 
         if self.move_idx < len(self.moves):
             move = self.moves[self.move_idx]
         else:
             move = DEFAULT_MOVE
 
-        advanced_game = False
-
-        # see `AAgent` for more info about why we have to keep trying moves like this
-        for i in range(POKEMON_MAX_MOVES):
-            chosen_move = move + i
-            self._goto_move(chosen_move)
-
-            self._general_button_press('A')
-            state = self._wait_for_battle_states()
-
-            # if clicking on one of the moves that *we're exploring* (not the 'default' move after the fact b/c of choice or encore or whatever)
-            #   didn't advance the game there is no point in continuing to search down that path so we raise an error
-            # NOTE: make sure we catch these error elsewhere
-            if state == TowerState.MOVE_SELECT and self.move_idx < len(self.moves):
-                logger.debug(f"Attempted to search over move {chosen_move} but it could not be chosen; stopping search.")
-                raise InvalidMoveSelected()
-            elif state == TowerState.SWAP_POKEMON:
-                logger.debug(f'Finished move search by swapping Pokemon. Current Pokemon did {self.hp_watcher.damage_dealt} damage.')
-                raise SwappedPokemon()
-            # any other state but MOVE_SELECT means that the move 'worked' (i.e. advanced the game)
-            elif state != TowerState.MOVE_SELECT:
-                advanced_game = True
-                self.state = TowerState.BATTLE  # this is important b/c we need to reset the state back to BATTLE
-
-                break
-
-        if not advanced_game:
-            self._log_error_image(f'could_not_search_move', state)
-            raise ValueError(f'Could not select a move while in move select (for some reason), on move idx {self.move_idx}, possible moves: {self.moves}')
-
         self.move_idx += 1
 
-        return state
+        return move
 
     def _act(self, action: str | None = None) -> np.ndarray:
         # _act is called the most frequently (basically every cycle) so it's the best place to check if we stop early
@@ -393,12 +362,10 @@ class BattleTowerSearchV2Agent(BattleTowerAgent):
             p.start()
 
 
-    def _select_move(self) -> TowerState:
+    def _select_move(self) -> int:
         savestate_file = uuid.uuid4().hex + '.dst'
         savestate_path = os.path.join(SEARCH_TMP_SAVESTATE_DIR, savestate_file)
         self.env.emu.savestate.save_file(savestate_path)
-
-        state = self.state
 
         logger.debug(f'Searching over {self.possible_moves}')
 
