@@ -14,6 +14,8 @@ CYCLES_PER_STEP = 60 # the game goes at 60 FPS, so this means each step will las
 CYCLES_PER_ACTION = 15 # this means each individual action (press a button, wait some time for effects) will last 15 frames
 CYCLES_PER_BUTTON_PRESS = 9 # this means we hold down a button press for 9 frames
 
+EMU = None # we're only allowed to have one emulator per process
+
 class PokemonEnv():
     """
     Creates an environment to run the Pokemon Platinum. 
@@ -42,9 +44,13 @@ class PokemonEnv():
             rom_file=ROM_FILE, 
             savestate_files=SAVESTATE_FILES, 
         ):
-        
-        self.emu = DeSmuME()
-        self.emu.volume_set(0) # even headless, desmume makes noise
+
+        global EMU
+        if EMU is None:
+            EMU = DeSmuME()
+            EMU.volume_set(0)  # even headless, desmume makes noise
+
+        self.emu = EMU
 
         self.emu.open(rom_file)
 

@@ -226,6 +226,9 @@ class TowerState(Enum):
     WON_SET = 102
     LOST_SET = 103
 
+    # used just for search to keep track of the state
+    STOPPED_SEARCH = 1000
+
 
 
 
@@ -362,12 +365,51 @@ class BattleTowerAgent:
 
         return state
 
-    def _select_and_execute_move(self) -> TowerState:
+    def _select_move(self) -> int:
         """
         This function is what makes the agent an agent. It is how we control which moves (or switches) that the agent takes.
         It expects that we're in move select, and it returns the TowerState that we're in after successfully selecting a move/advanced the game in one way or another.
         """
-        raise NotImplementedError("The BattleTowerAgent class is an abstract class, you need to subclass it and implement _select_and_execute_move yourself.")
+        raise NotImplementedError("The BattleTowerAgent class is an abstract class, you need to subclass it and implement _select_move yourself.")
+
+    def _execute_move(self, move: int) -> TowerState:
+        """
+        This function takes a move number (0-3, most likely from the output of `_select_move`)
+          and executes that move in the Pokemon client.
+        It expects that we're in move select, and it returns the TowerState that we're in after successfully
+          selecting a move/advanced the game in one way or another.
+
+        There's one slight snag, we may or may not be able to select the move (e.g. due to torment, choice specs)
+          but you are *still* in move select, unlike certain other conditions
+        There's no (good) way to know until after we click it, so we've just got to keep trying until we get it
+        It's a tad inefficient, but it *is* compatible w/ searching and choice moves b/c:
+        1. if we are searching over a set of moves that are different, we break
+        2. if we are searching the same move consecutively, then even if it isn't the first move, we'll eventually goto the choice selected move.
+        """
+
+        advanced_game = False
+        for i in range(POKEMON_MAX_MOVES):
+            # i is 0 at first, if the first move is successful, we'll never have to go to the next one
+            chosen_move = move + i
+            self._goto_move(chosen_move)
+
+            self._general_button_press('A')
+            state = self._wait_for_battle_states()
+
+            # any other state but MOVE_SELECT means that the move 'worked' (i.e. advanced the game)
+            # and so we can handle the logic of the next turn, otherwise we have to keep looping through the moves and trying them
+            if state != TowerState.MOVE_SELECT:
+                advanced_game = True
+                self.state = TowerState.BATTLE  # this is important b/c we need to reset the state back to BATTLE
+
+                break
+
+        if not advanced_game:
+            self._log_error_image('could_not_make_move', state)
+            raise ValueError('Could not select a move while in move select (for some reason)')
+
+        return state
+
 
     def _act(self, action: str | None = None) -> np.ndarray:
         """This function is basically a wrapper for the env.step but it also handles render logic"""
@@ -516,8 +558,7 @@ class BattleTowerAgent:
 
     def _run_battle_loop(self) -> TowerState:
         """
-        This is where the battle logic gets handled. By default, it just acts like the A-only agent, but by playing around
-        w/ the maximum depth, it can do lookahead search using the provided moves.
+        This is where the battle logic gets handled.
         Expects the game to be in a battle when the function is called.
         Supports a single move or a list of moves.
         - If there is only a single action, it always chooses that
@@ -533,25 +574,26 @@ class BattleTowerAgent:
         state = self.state
 
         while state != TowerState.WON_BATTLE and state != TowerState.END_OF_SET:
-                # NOTE: this works even on the first turn when you have to highlight the fight button b/c the while loop goes back to here
-                if state == TowerState.BATTLE:
-                    self._general_button_press('A')
+            # NOTE: this works even on the first turn when you have to highlight the fight button b/c the while loop goes back to here
+            if state == TowerState.BATTLE:
+                self._general_button_press('A')
 
-                # NOTE: w/ struggle (and maybe some other effect), you don't get to go into move select, you hit Fight and it happens automatically
-                #  so you'll either go to the next turn (w/ the Fight screen), you'll have to swap a pokemon, or the battle will end
-                #  which is why I still have to `_wait_for` after entering the move screen
-                state = self._wait_for_battle_states()
+            # NOTE: w/ struggle (and maybe some other effect), you don't get to go into move select, you hit Fight and it happens automatically
+            #  so you'll either go to the next turn (w/ the Fight screen), you'll have to swap a pokemon, or the battle will end
+            #  which is why I still have to `_wait_for` after entering the move screen
+            state = self._wait_for_battle_states()
 
-                if state == TowerState.MOVE_SELECT:
-                    self.state = state
-                    state = self._select_and_execute_move()
+            if state == TowerState.MOVE_SELECT:
+                self.state = state
+                move = self._select_move()
+                state = self._execute_move(move)
 
-                # I'm not using elif b/c this handles the cases where we don't go into move select (e.g. struggle) and faint,
-                #  *or* we went into move select, chose a move, then fainted afterwards
-                if state == TowerState.SWAP_POKEMON:
-                    self.state = state
-                    self._swap_to_next_pokemon()
-                    self.state = TowerState.BATTLE
+            # I'm not using elif b/c this handles the cases where we don't go into move select (e.g. struggle) and faint,
+            #  *or* we went into move select, chose a move, then fainted afterwards
+            if state == TowerState.SWAP_POKEMON:
+                self.state = state
+                self._swap_to_next_pokemon()
+                self.state = TowerState.BATTLE
 
         return state
 
@@ -671,138 +713,112 @@ Adamant Nature
 
 """
 
-    def _select_and_execute_move(self) -> TowerState:
-        move = 0
-        # the 'A' agent always tries to select the first move, but if that fails,
-        # we have some logic that'll let us select another move
-
-        state = self.state
-
-        # There's one slight snag, we may or may not be able to select the move (e.g. due to torment, choice specs)
-        #  but you are *still* in move select, unlike certain other conditions
-        # There's no (good) way to know until after we click it, so we've just got to keep trying until we get it
-        advanced_game = False
-        for i in range(POKEMON_MAX_MOVES):
-            # i is 0 at first, if the first move is successful, we'll never have to go to the next one
-            chosen_move = move + i
-            self._goto_move(chosen_move)
-
-            self._general_button_press('A')
-            state = self._wait_for_battle_states()
-
-            # any other state but MOVE_SELECT means that the move 'worked' (i.e. advanced the game)
-            # and so we can handle the logic of the next turn, otherwise we have to keep looping through the moves and trying them
-            if state != TowerState.MOVE_SELECT:
-                advanced_game = True
-                self.state = TowerState.BATTLE  # this is important b/c we need to reset the state back to BATTLE
-
-                break
-
-        if not advanced_game:
-            self._log_error_image('could_not_make_move', state)
-            raise ValueError('Could not select a move while in move select (for some reason)')
-
-        return state
+    def _select_move(self) -> int:
+        # the 'A' agent always tries to select the first move
+        return 0
 
 
 
 if __name__ == '__main__':
-    # agent = BattleTowerAAgent(render=True, db_interface=BattleTowerServerDBInterface())
+    agent = BattleTowerAAgent(
+        render=True,
+        #db_interface=BattleTowerServerDBInterface()
+    )
+
+    agent.play()
+
+    # from pokemon_env import *
+    # import keyboard
+    # import win32api
+    # import win32gui
+    # import time
     #
-    # agent.play()
-
-    from pokemon_env import *
-    import keyboard
-    import win32api
-    import win32gui
-    import time
-
-    emu = DeSmuME()
-    emu.open(ROM_FILE)
-    emu.savestate.load_file('ROM\Pokemon - Platinum Battle Tower Search Team.dst')
-    # emu.savestate.load_file('ROM\\14 Win Streak.dst')
-    emu.volume_set(0)
-
-
-    # Create the window for the emulator
-    window = emu.create_sdl_window()
-
-    # Get handle for desmume sdl window
-    window_handle = win32gui.FindWindow(None, "Desmume SDL")
-
-    checks = [
-        is_dialog_box,
-        is_save_dialog,
-        is_save_overwrite_dialog,
-        in_pokemon_select,
-        is_ready_for_battle_tower,
-        pokemon_is_fainted,
-        in_battle,
-        is_next_opponent_box,
-        won_set,
-        at_save_battle_video,
-        lost_set,
-        in_move_select,
-    ]
-
-    CONTROLS = {
-        "enter": Keys.KEY_START,
-        "right shift": Keys.KEY_SELECT,
-        "q": Keys.KEY_L,
-        "w": Keys.KEY_R,
-        "a": Keys.KEY_Y,
-        "s": Keys.KEY_X,
-        "x": Keys.KEY_A,
-        "z": Keys.KEY_B,
-        "up": Keys.KEY_UP,
-        "down": Keys.KEY_DOWN,
-        "right": Keys.KEY_RIGHT,
-        "left": Keys.KEY_LEFT,
-    }
-    while not window.has_quit():
-        # Check if any buttons are pressed and process them
-        # I like to just whipe all keys first so that I don't have to worry about removing keys or whatnot
-        emu.input.keypad_rm_key(Keys.NO_KEY_SET)
-
-        for key, emulated_button in CONTROLS.items():
-            if keyboard.is_pressed(key):
-                emu.input.keypad_add_key(keymask(emulated_button))
-            else:
-                emu.input.keypad_rm_key(keymask(emulated_button))
-
-        screen_buffer = emu.display_buffer_as_rgbx()
-        screen_pixels = np.frombuffer(screen_buffer, dtype=np.uint8)
-        screen = screen_pixels[:SCREEN_PIXEL_SIZE_BOTH * 4]
-        screen = screen.reshape((SCREEN_HEIGHT_BOTH, SCREEN_WIDTH, 4))[..., :3]  # drop the alpha channel
-
-        if keyboard.is_pressed('t'):
-            image_path = os.path.join('images', 'Decision Making', input('Enter image path:') + '.PNG')
-
-            cv2.imwrite(image_path, screen)
-
-        # Check if touch screen is pressed and process it
-        if win32api.GetKeyState(0x01) < 0:
-            # Get coordinates of click relative to desmume window
-            x, y = win32gui.ScreenToClient(window_handle, win32gui.GetCursorPos())
-            # Adjust y coord to account for clicks on top (non-touch) screen
-            y -= SCREEN_HEIGHT
-
-            if x in range(0, SCREEN_WIDTH) and y in range(0, SCREEN_HEIGHT):
-                emu.input.touch_set_pos(x, y)
-            else:
-                emu.input.touch_release()
-        else:
-            emu.input.touch_release()
-
-        for check in checks:
-            if check(screen):
-                print(f'{check.__name__}: {check(screen)}')
-
-        if pokemon_is_fainted(screen):
-            print(get_party_status(screen))
-
-        if is_next_opponent_box(screen):
-            print('Next opp:', get_battle_number(screen))
-
-        emu.cycle()
-        window.draw()
+    # emu = DeSmuME()
+    # emu.open(ROM_FILE)
+    # emu.savestate.load_file('ROM\Pokemon - Platinum Battle Tower Search Team.dst')
+    # # emu.savestate.load_file('ROM\\14 Win Streak.dst')
+    # emu.volume_set(0)
+    #
+    #
+    # # Create the window for the emulator
+    # window = emu.create_sdl_window()
+    #
+    # # Get handle for desmume sdl window
+    # window_handle = win32gui.FindWindow(None, "Desmume SDL")
+    #
+    # checks = [
+    #     is_dialog_box,
+    #     is_save_dialog,
+    #     is_save_overwrite_dialog,
+    #     in_pokemon_select,
+    #     is_ready_for_battle_tower,
+    #     pokemon_is_fainted,
+    #     in_battle,
+    #     is_next_opponent_box,
+    #     won_set,
+    #     at_save_battle_video,
+    #     lost_set,
+    #     in_move_select,
+    # ]
+    #
+    # CONTROLS = {
+    #     "enter": Keys.KEY_START,
+    #     "right shift": Keys.KEY_SELECT,
+    #     "q": Keys.KEY_L,
+    #     "w": Keys.KEY_R,
+    #     "a": Keys.KEY_Y,
+    #     "s": Keys.KEY_X,
+    #     "x": Keys.KEY_A,
+    #     "z": Keys.KEY_B,
+    #     "up": Keys.KEY_UP,
+    #     "down": Keys.KEY_DOWN,
+    #     "right": Keys.KEY_RIGHT,
+    #     "left": Keys.KEY_LEFT,
+    # }
+    # while not window.has_quit():
+    #     # Check if any buttons are pressed and process them
+    #     # I like to just whipe all keys first so that I don't have to worry about removing keys or whatnot
+    #     emu.input.keypad_rm_key(Keys.NO_KEY_SET)
+    #
+    #     for key, emulated_button in CONTROLS.items():
+    #         if keyboard.is_pressed(key):
+    #             emu.input.keypad_add_key(keymask(emulated_button))
+    #         else:
+    #             emu.input.keypad_rm_key(keymask(emulated_button))
+    #
+    #     screen_buffer = emu.display_buffer_as_rgbx()
+    #     screen_pixels = np.frombuffer(screen_buffer, dtype=np.uint8)
+    #     screen = screen_pixels[:SCREEN_PIXEL_SIZE_BOTH * 4]
+    #     screen = screen.reshape((SCREEN_HEIGHT_BOTH, SCREEN_WIDTH, 4))[..., :3]  # drop the alpha channel
+    #
+    #     if keyboard.is_pressed('t'):
+    #         image_path = os.path.join('images', 'Decision Making', input('Enter image path:') + '.PNG')
+    #
+    #         cv2.imwrite(image_path, screen)
+    #
+    #     # Check if touch screen is pressed and process it
+    #     if win32api.GetKeyState(0x01) < 0:
+    #         # Get coordinates of click relative to desmume window
+    #         x, y = win32gui.ScreenToClient(window_handle, win32gui.GetCursorPos())
+    #         # Adjust y coord to account for clicks on top (non-touch) screen
+    #         y -= SCREEN_HEIGHT
+    #
+    #         if x in range(0, SCREEN_WIDTH) and y in range(0, SCREEN_HEIGHT):
+    #             emu.input.touch_set_pos(x, y)
+    #         else:
+    #             emu.input.touch_release()
+    #     else:
+    #         emu.input.touch_release()
+    #
+    #     for check in checks:
+    #         if check(screen):
+    #             print(f'{check.__name__}: {check(screen)}')
+    #
+    #     if pokemon_is_fainted(screen):
+    #         print(get_party_status(screen))
+    #
+    #     if is_next_opponent_box(screen):
+    #         print('Next opp:', get_battle_number(screen))
+    #
+    #     emu.cycle()
+    #     window.draw()

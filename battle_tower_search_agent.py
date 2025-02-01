@@ -59,53 +59,16 @@ class BattleTowerSearchSubAgent(BattleTowerAgent):
         )
         return super()._run_battle_loop()
 
-    def _select_and_execute_move(self) -> TowerState:
+    def _select_move(self) -> int:
         # The search subagent starts by making each move in-order, and once we've gotten past the moves that we
         #  want to search over, we go back to using the 'default' move (i.e. the first one, which is as we saw with the 'A' agent, is pretty solid)
-        state = self.state
 
         if self.move_idx < len(self.moves):
             move = self.moves[self.move_idx]
         else:
             move = DEFAULT_MOVE
 
-        advanced_game = False
-
-        # There's one slight snag, we may or may not be able to select the move (e.g. due to torment, choice specs)
-        #  but you are *still* in move select, unlike certain other conditions
-        # There's no (good) way to know until after we click it, so we've just got to keep trying until we get it
-        # It's a *tad* inefficient, but it *is* compatible w/ searching and choice moves b/c:
-        # 1. if we are searching over a set of moves that are different, we break
-        # 2. if we are searching the same move consecutively, then even if it isn't the first move, we'll eventually goto the choice selected move.
-        for i in range(POKEMON_MAX_MOVES):
-            chosen_move = move + i
-            self._goto_move(chosen_move)
-
-            self._general_button_press('A')
-            state = self._wait_for_battle_states()
-
-            # if clicking on one of the moves that *we're exploring* (not the 'default' move after the fact b/c of choice or encore or whatever)
-            #   didn't advance the game there is no point in continuing to search down that path so we raise an error
-            # NOTE: make sure we catch this error elsewhere
-            # TODO: maybe come up with a better way to completely escape from the battle loop?
-            if state == TowerState.MOVE_SELECT and self.move_idx < len(self.moves):
-                logger.debug(f"Attempted to search over move {chosen_move} but it could not be chosen; stopping search.")
-                raise InvalidMoveSelected()
-
-            # any other state but MOVE_SELECT means that the move 'worked' (i.e. advanced the game)
-            elif state != TowerState.MOVE_SELECT:
-                advanced_game = True
-                self.state = TowerState.BATTLE  # this is important b/c we need to reset the state back to BATTLE
-
-                break
-
-        if not advanced_game:
-            self._log_error_image(f'could_not_search_move', state)
-            raise ValueError(f'Could not select a move while in move select (for some reason), on move idx {self.move_idx}, possible moves: {self.moves}')
-
-        self.move_idx += 1
-
-        return state
+        return move
 
 def search_moves(savestate_file: str, moves: list[int], search_queue: Queue) -> tuple[bool, list[int], int]:
     """
@@ -196,14 +159,11 @@ Adamant Nature
 - Aerial Ace  
 - Superpower""" # normally I do rest suicune, but I don't want to play a battle out crazy long just spamming rest
 
-    def _select_and_execute_move(self) -> TowerState:
-        # TODO: investigate early stopping methods, such as when we find a move combo that leads to a win,
-        #   may only need to run 1-2 more simulations from there to make sure we win
+    def _select_move(self) -> int:
         savestate_file = uuid.uuid4().hex + '.dst'
         savestate_path = os.path.join(SEARCH_TMP_SAVESTATE_DIR, savestate_file)
         self.env.emu.savestate.save_file(savestate_path)
 
-        state = self.state
         if self.depth == 1:
             possible_moves = [[move] for move in range(POKEMON_MAX_MOVES)]
         elif self.depth == 2:
@@ -226,7 +186,7 @@ Adamant Nature
         winning_result = None
         completed_processes = 0
         while winning_result is None and completed_processes < len(search_processes):
-            result = result_queue.get(block=True)
+            result = result_queue.get(block=True) # result looks like (won, move_list, # of turns)
             completed_processes += 1
 
             if result[0]:
@@ -245,31 +205,11 @@ Adamant Nature
             logger.info(f'After searching with a depth of {self.depth}, could not find a winning move. Just picking {DEFAULT_MOVE}')
             move = DEFAULT_MOVE
 
-        # it is *technically* possible that no move lead to a win, and that there are also some moves that aren't
-        #  possible to make, so we still have to do this whole thing *just in case* (see `AAgent` for more info about trying moves)
-        advanced_game = False
-        for i in range(POKEMON_MAX_MOVES):
-            chosen_move = move + i
-            self._goto_move(chosen_move)
-
-            self._general_button_press('A')
-            state = self._wait_for_battle_states()
-
-            if state != TowerState.MOVE_SELECT:
-                advanced_game = True
-                self.state = TowerState.BATTLE  # this is important b/c we need to reset the state back to BATTLE
-
-                break
-
-        if not advanced_game:
-            self._log_error_image('search_could_not_make_move', state)
-            raise ValueError(f'Could not select a move while in move select (for some reason)')
-
         # it's polite to clean up the savestate dir after finishing the search
         if os.path.exists(savestate_path):
             os.remove(savestate_path)
 
-        return state
+        return move
 
 # Other optimization notes (for speech or accuracy, maybe turn these into slight variations?):
 # 1. Maybe only do a search for the very first turn, but then also re-do the search whenever you have to swap Pokemon
@@ -278,11 +218,16 @@ Adamant Nature
 # 4. After receiving the 1st win, keep searching for either first_sample time * DURATION_MOD, or wait for N more wins and then just go w/ 'default' move
 # 5. Figure out some way to go w/ the 'last used move' instead of the 'default' move (but what about status moves?)
 # 6. Keep track of *how many times* a move led to a win (maybe even re-running the same move combo multiple times) and choosing the 'best' move that way
-# 7. What about random search?
+# 7. What about random search? Does randomly choosing a move during search make a difference?
+# 7.5 WHAT ABOUT CHOOSING "MOST EFFECTIVE" MOVE (based on type combo and damage mod) Implement this in v3 agent
 # 8. BIG OPTIMIZATION: keep the processes alive and more specifically desmume; loading a savestate is pretty quick, but there is a bit of a delay whenever you start up desmume
 # 9. When doing a depth of 2, use *both* moves, don't just use the first move (which means it'll take 2 turns)
 
 if __name__ == '__main__':
-    agent = BattleTowerSearchAgent(render=True, depth=1, db_interface=BattleTowerServerDBInterface())
+    agent = BattleTowerSearchAgent(
+        render=True,
+        depth=1,
+        #db_interface=BattleTowerServerDBInterface()
+    )
 
     agent.play()
