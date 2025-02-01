@@ -254,40 +254,7 @@ def search_moves(savestate_file: str, moves: list[int], search_queue: Queue, dam
 
     search_queue.put((won, damage_dealt, moves, agent.move_idx))
 
-class BattleTowerSearchV2Agent(BattleTowerAgent):
-
-    def __init__(self,
-        render=False,
-        savestate_file=SEARCH_TEAM_SAVESTATE,
-        db_interface: BattleTowerDBInterface = None,
-        depth=1,
-        team=None,
-    ):
-        """
-        V2 Strategy:
-        1. Only search until current Pokemon faints
-          * If current Pokemon selects a winning move combination, go with that (or maybe 1 more move just to confirm)
-          * If there is no winning combination, use the total amount of damage they did before fainting and use that to determine which move to take
-          * [OPTIONAL] if there is no winning move, try swapping to a different Pokemon and seeing how effective it is w/ search_depth=1
-        2. Whenever we swap, if there are two options, do a search for each of them
-          * [IMPLEMENTATION] search_whatever can have the move combo and also swap=None, 1, or 2
-        3. We may stop searching before all moves have been fully searched. Whenever a search returns, we check:
-          1. If that search won the battle, we immediately stop.
-          2. If that search didn't win the battle, we check whether it is the highest-damaging search *at that wall-clock time of the search*
-             * If that move's damage is higher than anything else at that point, we stop searching and go with it
-             * Otherwise, we keep waiting.
-             * It's possible that a different move will lead to a larger damage overall, just take more time,
-               but w/ the current moveset of each Pokemon, that's unlikely (in a sense, it's a tradeoff of time vs accuracy)
-
-        depth is how many combinations of moves that we'll try, although it's more like a class than an actual # of steps we'll go down the tree
-        If depth is 1 or 2, it's all possible permutations of move 1 or 2 nodes down the tree. If depth is 3, we also include swapping Pokemon
-        """
-        super().__init__(render, savestate_file, db_interface)
-
-        self.depth = depth
-        self.strategy = f'search_v2_depth_{depth}'
-        if team is None:
-            self.team = """Garchomp @ Focus Sash  
+GARCHOMP_SUICUNE_SCIZOR_TEAM = """Garchomp @ Focus Sash  
 Ability: Sand Veil  
 EVs: 4 HP / 252 Atk / 252 Spe  
 Jolly Nature  
@@ -314,6 +281,48 @@ Adamant Nature
 - Bug Bite  
 - Aerial Ace  
 - Superpower""" # normally I do rest suicune, but I don't want to play a battle out crazy long just spamming rest
+
+class BattleTowerSearchV2Agent(BattleTowerAgent):
+
+    def __init__(self,
+        render=False,
+        savestate_file=SEARCH_TEAM_SAVESTATE,
+        db_interface: BattleTowerDBInterface = None,
+        depth=1,
+        team=GARCHOMP_SUICUNE_SCIZOR_TEAM,
+    ):
+        """
+        V2 Strategy:
+        1. Only search until current Pokemon faints
+          * If current Pokemon selects a winning move combination, go with that (or maybe 1 more move just to confirm)
+          * If there is no winning combination, use the total amount of damage they did before fainting and use that to determine which move to take
+          * [OPTIONAL] if there is no winning move, try swapping to a different Pokemon and seeing how effective it is w/ search_depth=1
+        2. Whenever we swap, if there are two options, do a search for each of them
+          * [IMPLEMENTATION] search_whatever can have the move combo and also swap=None, 1, or 2
+          * [OPTIONAL] also check this at the beginning of the game? Maybe the lead pokemon is not good against the opponent's lead
+        3. We may stop searching before all moves have been fully searched. Whenever a search returns, we check:
+          1. If that search won the battle, we immediately stop.
+          2. If that search didn't win the battle, we check whether it is the highest-damaging search *at that wall-clock time of the search*
+             * If that move's damage is higher than anything else at that point, we stop searching and go with it
+             * Otherwise, we keep waiting.
+             * It's possible that a different move will lead to a larger damage overall, just take more time,
+               but w/ the current moveset of each Pokemon, that's unlikely (in a sense, it's a tradeoff of time vs accuracy)
+        4. If we've found a win, we will stop searching and then go w/ the list of moves selected there.
+            * This is a bit of a tradeoff b/w speed and performance, but if we've found a win, we're likly only a turn or two away anyways
+            * If we have to swap pokemon, this gets reset, which helps in case we thought we won but in fact something changed.
+
+        depth is how many combinations of moves that we'll try, although it's more like a class than an actual # of steps we'll go down the tree
+        If depth is 1 or 2, it's all possible permutations of move 1 or 2 nodes down the tree. If depth is 3, we also include swapping Pokemon
+        """
+        super().__init__(render, savestate_file, db_interface)
+
+        self.depth = depth
+        self.strategy = f'search_v2_depth_{depth}'
+        self.team = team
+
+        # search optimization here: if we find a winning move combo, lets just use it!
+        self.winning_move_list = None
+        self.winning_move_idx = 0
 
     def _select_and_execute_move(self) -> TowerState:
         savestate_file = uuid.uuid4().hex + '.dst'
@@ -383,8 +392,10 @@ Adamant Nature
 
         if best_result:
             move = best_result[2][0] # remember, the result is a tuple of (won, damage, move_list, turns)
-            logger.info(f'After searching with a depth of {self.depth}, move {move} did {best_result[1]} damage in {best_result[3]} turns'
-                        + ' and lead to a win.' if best_result[0] else '.')
+            log_str = f'After searching with a depth of {self.depth}, move {move} did {best_result[1]} damage in {best_result[3]} turns.'
+            if best_result[0]:
+                log_str += ' Won the game.'
+            logger.info(log_str)
         else:
             # okay it's highly unlikely, but technically possible, that we don't get a best_result from the above search
             # if, e.g. the last search move had done the most amount of damage when all other searches terminated, but then the opponent healed
@@ -437,6 +448,11 @@ Adamant Nature
 
         logger.info(f'A Pokemon has fainted, current party status: ' + ' | '.join([f'Slot {i+1} {"healthy" if status else "fainted"}' for i, status in enumerate(party_status)]))
 
+        # when we swap pokemon, we need to reset the "winning" move list b/c something CLEARLY went wrong and we didn't win
+        self.winning_move_list = None
+        self.winning_move_idx = 0
+
+        # TODO: instead of swapping to the next pokemon, implement a way to search over the next possible pokemon (assuming you have a choice)
         swapped_pokemon = False
         for i, slot_is_healthy in enumerate(party_status):
             if slot_is_healthy: # once we get to a healthy Pokemon, we need to hit A twice to select it and send it out on the field
@@ -459,22 +475,18 @@ Adamant Nature
 # 4. After receiving the 1st win, keep searching for either first_sample time * DURATION_MOD, or wait for N more wins and then just go w/ 'default' move
 # 5. Figure out some way to go w/ the 'last used move' instead of the 'default' move (but what about status moves?)
 # 6. Keep track of *how many times* a move led to a win (maybe even re-running the same move combo multiple times) and choosing the 'best' move that way
-# 7. What about random search?
+# 7. What about random search? Does randomly choosing a move during search make a difference?
+# 7.5 WHAT ABOUT CHOOSING "MOST EFFECTIVE" MOVE (based on type combo and damage mod) Implement this in v3 agent
 # 8. BIG OPTIMIZATION: keep the processes alive and more specifically desmume; loading a savestate is pretty quick, but there is a bit of a delay whenever you start up desmume
 # 9. When doing a depth of 2, use *both* moves, don't just use the first move (which means it'll take 2 turns)
 
 
-# V2 Strategy:
-# 1. Only search until current Pokemon faints
-#   * If current Pokemon selects a winning move combination, go with that (or maybe 1 more move just to confirm)
-#   * If there is no winning combination, use the total amount of damage they did before fainting and use that to determine which move to take
-# 2. Whenever we swap, if there are two options, do a search for each of them
-#   * [IMPLEMENTATION] search_whatever can have the move combo and also swap=None, 1, or 2
+
 if __name__ == '__main__':
     agent = BattleTowerSearchV2Agent(
         render=True,
         depth=1,
-        #db_interface=BattleTowerServerDBInterface()
+        db_interface=BattleTowerServerDBInterface()
     )
 
     agent.play()
