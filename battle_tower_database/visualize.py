@@ -12,8 +12,8 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 genai.configure(api_key=GEMINI_API_KEY)
 
-MODEL_NAME = 'gemini-2.0-flash-thinking-exp-1219'
-
+MODEL_NAME = 'gemini-2.0-flash-thinking-exp-01-21'
+MODEL_NAME = 'gemini-exp-1206'
 
 SCHEMA = """TABLES:
 streaks:

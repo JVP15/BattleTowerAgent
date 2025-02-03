@@ -33,6 +33,7 @@ os.makedirs(SEARCH_SAVESTATE_DIR, exist_ok=True)
 BUTTON_PRESS_DURATION = 5
 AFTER_PRESS_WAIT = 30 # I have no good justification for this, we just need to spend some amount of time waiting for the game to process our input
 
+
 REF_IMG_DIR = os.path.join('images', 'references')
 
 BATTLE_TOWER_STREAK_LENGTH = 7
@@ -267,7 +268,6 @@ class BattleTowerAgent:
         self.cur_frame = self.env.step(None)
 
     def play(self):
-
         while True:
             self.play_set()
 
@@ -276,6 +276,10 @@ class BattleTowerAgent:
         Plays a single 7-game set through the battle tower, returning True if we won the set and False if we lost.
         Requires the player to be directly adjacent and facing the center person; it will return the player in the same spot and direction.
         """
+        # for the initial set, this helps seed the RNG and also the opponent's battle tower team
+        # w/o it, it always gets the battle tower team from when the savestate was made (not the proper opponent set)
+        self._general_button_press(['UP'])
+
         start_time = time.time()
         set_start_cycle = self.num_cycles
 

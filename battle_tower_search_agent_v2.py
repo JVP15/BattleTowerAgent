@@ -1,5 +1,6 @@
 import logging
 import os
+import traceback
 import uuid
 from multiprocessing import Pool, Queue, Process, Value, Event, Barrier
 
@@ -239,7 +240,7 @@ def init_search_process(
         ):
             # NOTE: this is effectively treated as a loss, I want to keep it as a different state
             state = TowerState.STOPPED_SEARCH
-        except:
+        except Exception:
             state = TowerState.LOST_SET
 
         won = False
@@ -247,14 +248,20 @@ def init_search_process(
         if state == TowerState.WON_BATTLE:
             won = True
         elif state == TowerState.END_OF_SET:
-            state = agent._wait_for(
-                (won_set, TowerState.WON_SET),
-                (lost_set, TowerState.LOST_SET),
-                button_press='B', # I want to skip dialog and also not accidentally re-start another dialog, so I choose B over A
-            )
+            try:
+                state = agent._wait_for(
+                    (won_set, TowerState.WON_SET),
+                    (lost_set, TowerState.LOST_SET),
+                    button_press='B', # I want to skip dialog and also not accidentally re-start another dialog, so I choose B over A
+                )
 
-            if state == TowerState.WON_SET:
-                won = True
+                if state == TowerState.WON_SET:
+                    won = True
+
+            # in this situation, the search algo finished the game but hasn't confirmed the win yet
+            # but another search tree already won and signaled a stop
+            except:
+                pass
 
         with damage_value.get_lock():
             damage_dealt = damage_value.value
@@ -321,7 +328,10 @@ class BattleTowerSearchV2Agent(BattleTowerAgent):
         4. If we've found a win, we will stop searching and then go w/ the list of moves selected there.
             * This is a bit of a tradeoff b/w speed and performance, but if we've found a win, we're likly only a turn or two away anyways
             * If we have to swap pokemon, this gets reset, which helps in case we thought we won but in fact something changed.
-
+        5. [OPTIONAL] limit the search depth to 10 turns (or however many turns it takes for toxic to KO + 1)
+          b/c if we search for 20 turns, it isn't likely that we'll find a better move vs just searching for 10 turns (it actually takes 6 rounds for toxic to KO)
+            * Should compare how fast searching works too b/c I've added a lot of extra checks and need to see if now its not just the game that takes a while
+            * If the search
         depth is how many combinations of moves that we'll try, although it's more like a class than an actual # of steps we'll go down the tree
         If depth is 1 or 2, it's all possible permutations of move 1 or 2 nodes down the tree. If depth is 3, we also include swapping Pokemon
         """
@@ -346,7 +356,6 @@ class BattleTowerSearchV2Agent(BattleTowerAgent):
             raise NotImplementedError("I don't have the hardware to have any deeper trees")
 
         # TODO: how will this work when we want to swap pokemon? I guess we'll just leave some processes waiting
-        # Also will have to change this when I add pokemon swapping
         self.damage_values = [Value('i', 0) for _ in range(len(self.possible_moves))]
         self.savestate_file_queues = [Queue() for _ in range(len(self.possible_moves))]
         self.stop_event = Event()
@@ -355,8 +364,8 @@ class BattleTowerSearchV2Agent(BattleTowerAgent):
         self.processes = []
         for i, move_list in enumerate(self.possible_moves):
             p = Process(
-                target=init_search_process,
-                args=(self.savestate_file_queues[i], move_list, self.result_queue, self.damage_values[i])
+                target=init_search_process, # args look like savestate_queue, move_list, result_queue, stop_event, stop_barrier, and damage
+                args=(self.savestate_file_queues[i], move_list, self.result_queue, self.stop_event, self.search_stop_barrier, self.damage_values[i])
             )
             self.processes.append(p)
             p.start()
@@ -396,10 +405,10 @@ class BattleTowerSearchV2Agent(BattleTowerAgent):
                     logger.debug('Stopping early b/c we found a move that is the best so far.')
 
         if best_result is not None:
+            # this tells all processes to half whatever they were doing and add their results (at that point) to the queue
             self.stop_event.set()
 
-
-        logger.debug(f'Damage values at the end of the search: {[v.value for v in damage_values]}')
+        logger.debug(f'Damage values at the end of the search: {[v.value for v in self.damage_values]}')
 
         if best_result:
             move = best_result[2][0] # remember, the result is a tuple of (won, damage, move_list, turns)
@@ -416,6 +425,9 @@ class BattleTowerSearchV2Agent(BattleTowerAgent):
             logger.info(f'After exhausting all searches with a depth of {self.depth}, '
                         f'got into a rare situation where no best move was initially found. '
                         f'Choosing move {move}, which lead to {max_damage} damage dealt.')
+
+        # this is very important to make sure that everything is synchronized
+        self._reset_search()
 
         # it's polite to clean up the savestate dir after finishing the search
         if os.path.exists(savestate_path):
@@ -481,11 +493,18 @@ class BattleTowerSearchV2Agent(BattleTowerAgent):
             while not file_queue.empty():
                 file_queue.get()
 
-        # TODO: figure out stop event here
+        # once all processes, successfully add their results to the queue, this will pass
+        #  and we can clean up the queue, damages, and event and be on with our day
+        self.search_stop_barrier.wait()
+
+        while not self.result_queue.empty():
+            self.result_queue.get()
 
         for damage_value in self.damage_values:
             with damage_value.get_lock():
                 damage_value.value = 0
+
+        self.stop_event.clear()
 
 if __name__ == '__main__':
     agent = BattleTowerSearchV2Agent(
