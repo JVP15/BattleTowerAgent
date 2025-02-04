@@ -243,6 +243,8 @@ class BattleTowerAgent:
             include_bottom_screen=True,
             savestate_files=[savestate_file],
         )
+        self.env.reset()
+
         self.render = render
 
         self.state = TowerState.LOBBY
@@ -250,7 +252,7 @@ class BattleTowerAgent:
         self.current_streak = 0
         self.longest_streak = 0
         self.num_attempts = 0
-        self.cur_frame = None
+        self.cur_frame = self.env.step(None)
 
         self.num_cycles = 0
         self.cur_battle_start_cycle = 0 # this is useful for keeping track of the duration of a battle (mainly for DB logging purposes)
@@ -259,13 +261,6 @@ class BattleTowerAgent:
             db_interface = BattleTowerDBInterface()
 
         self.db_interface = db_interface
-
-        self.reset()
-
-    def reset(self):
-        self.current_streak = 0
-        self.env.reset()
-        self.cur_frame = self.env.step(None)
 
     def play(self):
         while True:
@@ -390,6 +385,7 @@ class BattleTowerAgent:
         1. if we are searching over a set of moves that are different, we break
         2. if we are searching the same move consecutively, then even if it isn't the first move, we'll eventually goto the choice selected move.
         """
+        state = self.state
 
         advanced_game = False
         for i in range(POKEMON_MAX_MOVES):
@@ -456,12 +452,10 @@ class BattleTowerAgent:
 
         while reached_state is None:
             logger.log(msg=f'Pressing {button_press}', level=logging.BUTTON_PRESS)
+
+            # this makes sure we hold down the button long enough to take an action (making sure we don't just 'tap' A for 1 frame)
             for _ in range(BUTTON_PRESS_DURATION):
                 self.cur_frame = self._act(button_press)
-                # this makes sure we hold down the button long enough to take an action (making sure we don't just 'tap' A for 1 frame)
-                # don't remove it b/c it fixed a bug when waiting for BATTLE or MOVE_SELECT
-                # if not reached_state:
-                #    reached_state = run_checks(self.cur_frame)
                 reached_state = run_checks(self.cur_frame)
                 if reached_state:
                     break
@@ -469,6 +463,7 @@ class BattleTowerAgent:
             # after any # press, even if we do reach the state, we'll always wait the full duration so that we can let the game process things
             for _ in range(AFTER_PRESS_WAIT):
                 self.cur_frame = self._act()
+
                 if not reached_state:
                     reached_state = run_checks(self.cur_frame)
 
@@ -568,6 +563,7 @@ class BattleTowerAgent:
         - If there is only a single action, it always chooses that
         - If there are a list of actions, performs them 1-by-1
         If a chosen move is blocked for some reason, it'll choose the next move (based on position) once, then go back to the normal order (however the move will be consumed from the move selection list)
+        Loops until the battle is over (either we're in the winning state or the end of set state)
         """
         if not in_battle(self.cur_frame) and self.state != TowerState.BATTLE:
             self._log_error_image(message='not_in_battle', state=self.state)
@@ -578,6 +574,7 @@ class BattleTowerAgent:
         state = self.state
 
         while state != TowerState.WON_BATTLE and state != TowerState.END_OF_SET:
+
             # NOTE: this works even on the first turn when you have to highlight the fight button b/c the while loop goes back to here
             if state == TowerState.BATTLE:
                 self._general_button_press('A')
@@ -585,6 +582,7 @@ class BattleTowerAgent:
             # NOTE: w/ struggle (and maybe some other effect), you don't get to go into move select, you hit Fight and it happens automatically
             #  so you'll either go to the next turn (w/ the Fight screen), you'll have to swap a pokemon, or the battle will end
             #  which is why I still have to `_wait_for` after entering the move screen
+
             state = self._wait_for_battle_states()
 
             if state == TowerState.MOVE_SELECT:
@@ -725,7 +723,7 @@ Adamant Nature
 
 if __name__ == '__main__':
     agent = BattleTowerAAgent(
-        render=True,
+        render=False,
         #db_interface=BattleTowerServerDBInterface()
     )
 

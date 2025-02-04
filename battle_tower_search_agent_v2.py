@@ -34,6 +34,9 @@ logging.basicConfig(level=logging.DEBUG)
 
 HP_PER_POKEMON = 100
 
+# minor optimization here, if we haven't either fainted or won by 10 turns (chosen somewhat arbitrarily) then we probably have a good idea of the search space
+SUBAGENT_STOPPING_TURN = 10
+
 def opp_pokemon_is_out(frame):
     """
     This function checks whether the opponent's pokemon is fully out (i.e. that we're in battle,
@@ -101,7 +104,7 @@ class HPWatcher:
                 self.damage_dealt += hp_diff
                 self.opp_hp = opp_hp
 
-                # minor optimization; HP changes every, say, 3 frames, so we don't need to acquire the lock if the opp's HP doesn't change this frame
+                # MINOR OPTIMIZATION: HP changes every, say, 3 frames, so we don't need to acquire the lock if the opp's HP doesn't change this frame
                 if self.damage_value is not None and hp_diff != 0:
                     with self.damage_value.get_lock():
                         self.damage_value.value += hp_diff
@@ -192,6 +195,10 @@ class BattleTowerSearchV2SubAgent(BattleTowerAgent):
         # The search subagent starts by making each move in-order, and once we've gotten past the moves that we
         #  want to search over, we go back to using the 'default' move (i.e. the first one, which is as we saw with the 'A' agent, is pretty solid)
 
+        if self.move_idx >= SUBAGENT_STOPPING_TURN:
+            logger.debug(f'Stopping Search Subagent because we hit turn search limit of {SUBAGENT_STOPPING_TURN}')
+            raise EarlySearchStop()
+
         if self.move_idx < len(self.moves):
             move = self.moves[self.move_idx]
         else:
@@ -240,8 +247,9 @@ def init_search_process(
         ):
             # NOTE: this is effectively treated as a loss, I want to keep it as a different state
             state = TowerState.STOPPED_SEARCH
-        except Exception:
+        except Exception as e:
             state = TowerState.LOST_SET
+            logger.warning(f'Encountered an unexpected error while searching: {e}')
 
         won = False
 
@@ -258,10 +266,10 @@ def init_search_process(
                 if state == TowerState.WON_SET:
                     won = True
 
-            # in this situation, the search algo finished the game but hasn't confirmed the win yet
-            # but another search tree already won and signaled a stop
-            except:
-                pass
+            except EarlySearchStop:
+                pass # just don't want to log when we do an early search
+            except Exception as e:
+                logger.warning(f'Encountered an unexpected error while searching: {e}')
 
         with damage_value.get_lock():
             damage_dealt = damage_value.value
@@ -328,12 +336,13 @@ class BattleTowerSearchV2Agent(BattleTowerAgent):
         4. If we've found a win, we will stop searching and then go w/ the list of moves selected there.
             * This is a bit of a tradeoff b/w speed and performance, but if we've found a win, we're likly only a turn or two away anyways
             * If we have to swap pokemon, this gets reset, which helps in case we thought we won but in fact something changed.
+            * Since we also keep track of how many turns the battle *should* take, we can do a reset if it ends up suprising us
         5. [OPTIONAL] limit the search depth to 10 turns (or however many turns it takes for toxic to KO + 1)
           b/c if we search for 20 turns, it isn't likely that we'll find a better move vs just searching for 10 turns (it actually takes 6 rounds for toxic to KO)
-            * Should compare how fast searching works too b/c I've added a lot of extra checks and need to see if now its not just the game that takes a while
-            * If the search
+            * This also synergizes well w/ the "stop searching on found win" b/c we may win and PP stall after 20 turns (by "may" I mean we *have*)
+                but this will prevent it.
+
         depth is how many combinations of moves that we'll try, although it's more like a class than an actual # of steps we'll go down the tree
-        If depth is 1 or 2, it's all possible permutations of move 1 or 2 nodes down the tree. If depth is 3, we also include swapping Pokemon
         """
         super().__init__(render, savestate_file, db_interface)
 
@@ -341,11 +350,16 @@ class BattleTowerSearchV2Agent(BattleTowerAgent):
         self.strategy = f'search_v2_depth_{depth}'
         self.team = team
 
-        # search optimization here: if we find a winning move combo, lets just use it!
+        # SEARCH OPTIMIZATION: if we find a winning move combo, lets just use it!
+        # This is a bit of a tradeoff b/w speed (fewer searches) and accuracy (since we could find a better search later)
+        # Even for a simple 2-turn battle (e.g. Earthquake turn 1 + Outrage) it takes ~20 seconds from turn 1 to finish
+        # But it only takes ~15 seconds by using the cached winning move. The time savings will be even greater for games w/ 2,3, or 4 moves out.
         self.winning_move_list = None
         self.winning_move_idx = 0
+        self.pred_turns_to_win = 0
 
-        # speed optimization over v1 agent: persistant process (this saves time both spooling up the process and also initing Desmume, which is slow)
+        # SPEED OPTIMIZATION: (over v1 agent) persistant process (this saves time both spooling up the process and also initing Desmume, which is slow)
+        #  seems to be about 20% faster
         self.result_queue = Queue()
 
         if depth == 1:
@@ -371,67 +385,94 @@ class BattleTowerSearchV2Agent(BattleTowerAgent):
             p.start()
 
 
+    def _run_battle_loop(self) -> TowerState:
+        state = super()._run_battle_loop()
+        self._reset_winning_moves() # IMPORTANT: need to reset the winning move list after each battle
+
+        return state
+
     def _select_move(self) -> int:
-        savestate_file = uuid.uuid4().hex + '.dst'
-        savestate_path = os.path.join(SEARCH_TMP_SAVESTATE_DIR, savestate_file)
-        self.env.emu.savestate.save_file(savestate_path)
+        if self.winning_move_idx > self.pred_turns_to_win:
+            self._reset_winning_moves()
+            logger.debug(f"We're on turn {self.winning_move_idx} of the 'winning' move list yet we expected to win in {self.pred_turns_to_win}, search will resume.")
 
-        logger.debug(f'Searching over {self.possible_moves}')
+        if self.winning_move_list is None:
+            savestate_file = uuid.uuid4().hex + '.dst'
+            savestate_path = os.path.join(SEARCH_TMP_SAVESTATE_DIR, savestate_file)
+            self.env.emu.savestate.save_file(savestate_path)
 
-        # this kicks off the search; each process will consume the savestate file and begin the search agent
-        for q in self.savestate_file_queues:
-            q.put(savestate_path, block=True)
+            logger.debug(f'Searching over {self.possible_moves}')
 
-        # see class docstring for the search algorithm here
-        best_result = None
-        completed_searches = 0
-        while best_result is None and completed_searches < len(self.processes):
-            # result looks like (won, damage_dealt, move_list, # of turns it took)
-            result = self.result_queue.get(block=True)
-            completed_searches += 1
+            # this kicks off the search; each process will consume the savestate file and begin the search agent
+            for q in self.savestate_file_queues:
+                q.put(savestate_path, block=True)
 
-            won_battle = result[0]
-            if won_battle:
-                best_result = result
-                logger.debug('Found a winning move, stopping early.')
-            else:
-                damage_dealt = result[1]
+            # see class docstring for the search algorithm here
+            best_result = None
+            completed_searches = 0
+            while best_result is None and completed_searches < len(self.processes):
+                # result looks like (won, damage_dealt, move_list, # of turns it took)
+                result = self.result_queue.get(block=True)
+                completed_searches += 1
 
-                _, max_damage = self._damage_argmax()
-
-                # if we're as good or better than any other search at this very moment, we can stop early
-                if damage_dealt > max_damage:
+                won_battle = result[0]
+                if won_battle:
                     best_result = result
-                    logger.debug('Stopping early b/c we found a move that is the best so far.')
 
-        if best_result is not None:
-            # this tells all processes to half whatever they were doing and add their results (at that point) to the queue
-            self.stop_event.set()
+                    self.winning_move_list = result[2]
+                    self.pred_turns_to_win = result[3]
+                    self.winning_move_idx += 1
 
-        logger.debug(f'Damage values at the end of the search: {[v.value for v in self.damage_values]}')
+                    logger.debug(f'Found a winning move, stopping early.')
 
-        if best_result:
-            move = best_result[2][0] # remember, the result is a tuple of (won, damage, move_list, turns)
-            log_str = f'After searching with a depth of {self.depth}, move {move} did {best_result[1]} damage in {best_result[3]} turns.'
-            if best_result[0]:
-                log_str += ' Won the game.'
-            logger.info(log_str)
+                else:
+                    damage_dealt = result[1]
+
+                    _, max_damage = self._damage_argmax()
+
+                    # if we're as good or better than any other search at this very moment, we can stop early
+                    if damage_dealt > max_damage:
+                        best_result = result
+                        logger.debug('Stopping early b/c we found a move that is the best so far.')
+
+            if best_result is not None:
+                # this tells all processes to halt whatever they were doing and add their results (at that point) to the queue
+                self.stop_event.set()
+
+            logger.debug(f'Damage values at the end of the search: {[v.value for v in self.damage_values]}')
+
+            if best_result:
+                move = best_result[2][0] # remember, the result is a tuple of (won, damage, move_list, turns)
+                log_str = f'After searching with a depth of {self.depth}, move {move} did {best_result[1]} damage in {best_result[3]} turns.'
+                if best_result[0]:
+                    log_str += f' Won the game. Following {best_result[2]} for the rest of the game.'
+                logger.info(log_str)
+            else:
+                # okay it's highly unlikely, but technically possible, that we don't get a best_result from the above search
+                # if, e.g. the last search move had done the most amount of damage when all other searches terminated, but then the opponent healed
+                #  and so it did less final damage
+                max_idx, max_damage = self._damage_argmax()
+                move = self.possible_moves[max_idx][0]
+                logger.info(f'After exhausting all searches with a depth of {self.depth}, '
+                            f'got into a rare situation where no best move was initially found. '
+                            f'Choosing move {move}, which lead to {max_damage} damage dealt.')
+
+            # this is very important to make sure that everything is synchronized
+            self._reset_search()
+
+            # it's polite to clean up the savestate dir after finishing the search
+            if os.path.exists(savestate_path):
+                os.remove(savestate_path)
         else:
-            # okay it's highly unlikely, but technically possible, that we don't get a best_result from the above search
-            # if, e.g. the last search move had done the most amount of damage when all other searches terminated, but then the opponent healed
-            #  and so it did less final damage
-            max_idx, max_damage = self._damage_argmax()
-            move = self.possible_moves[max_idx][0]
-            logger.info(f'After exhausting all searches with a depth of {self.depth}, '
-                        f'got into a rare situation where no best move was initially found. '
-                        f'Choosing move {move}, which lead to {max_damage} damage dealt.')
+            # this will speed up certain scenarios by not having to search over, say, the last turn b/c we've already seen that the particular move wins in that scenario
+            if self.winning_move_idx < len(self.winning_move_list):
+                move = self.winning_move_list[self.winning_move_idx]
+            else:
+                move = DEFAULT_MOVE
 
-        # this is very important to make sure that everything is synchronized
-        self._reset_search()
+            logger.info(f'Using cached move list {self.winning_move_list} which leads to a win. On turn {self.winning_move_idx}, choosing move {move}.')
 
-        # it's polite to clean up the savestate dir after finishing the search
-        if os.path.exists(savestate_path):
-            os.remove(savestate_path)
+            self.winning_move_idx += 1
 
         return move
 
@@ -452,8 +493,9 @@ class BattleTowerSearchV2Agent(BattleTowerAgent):
         logger.info(f'A Pokemon has fainted, current party status: ' + ' | '.join([f'Slot {i+1} {"healthy" if status else "fainted"}' for i, status in enumerate(party_status)]))
 
         # when we swap pokemon, we need to reset the "winning" move list b/c something CLEARLY went wrong and we didn't win
-        self.winning_move_list = None
-        self.winning_move_idx = 0
+        if self.winning_move_list is not None:
+            logger.debug(f'Expected to win by following {self.winning_move_list}, but on turn {self.winning_move_idx} the current pokemon fainted. Restarting search.')
+        self._reset_winning_moves()
 
         # TODO: instead of swapping to the next pokemon, implement a way to search over the next possible pokemon (assuming you have a choice)
         swapped_pokemon = False
@@ -506,11 +548,17 @@ class BattleTowerSearchV2Agent(BattleTowerAgent):
 
         self.stop_event.clear()
 
+    def _reset_winning_moves(self):
+        """This function is used to clear the movelist that we follow when we found a winner."""
+        self.winning_move_list = None
+        self.winning_move_idx = 0
+        self.pred_turns_to_win = 0
+
 if __name__ == '__main__':
     agent = BattleTowerSearchV2Agent(
-        render=True,
-        depth=1,
-        #db_interface=BattleTowerServerDBInterface()
+        render=False,
+        depth=2,
+        db_interface=BattleTowerServerDBInterface()
     )
 
     agent.play()
