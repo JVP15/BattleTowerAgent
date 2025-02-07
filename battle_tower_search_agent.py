@@ -1,5 +1,7 @@
 import logging
+import multiprocessing
 import os
+import time
 import uuid
 from multiprocessing import Pool, Queue, Process
 
@@ -11,13 +13,17 @@ from battle_tower_agent import (
     TowerState,
     POKEMON_MAX_MOVES,
     in_battle, ROM_DIR, won_set, lost_set,
+    SEARCH_SAVESTATE_DIR,
 )
 
 from battle_tower_database.interface import BattleTowerDBInterface, BattleTowerServerDBInterface
 
 DEFAULT_MOVE = 0
-SEARCH_TEAM_SAVESTATE = os.path.join(ROM_DIR, 'Pokemon - Platinum Battle Tower Search Team.dst')
-SEARCH_TMP_SAVESTATE_DIR = os.path.join(ROM_DIR, 'search')
+
+if os.name == 'nt':
+    SEARCH_TEAM_SAVESTATE = os.path.join(ROM_DIR, 'Pokemon - Platinum Battle Tower Search Team.dst')
+else:
+    SEARCH_TEAM_SAVESTATE = os.path.join(ROM_DIR, 'Pokemon - Platinum Battle Tower Search Team Linux.dst')
 
 logger = logging.getLogger('SearchTowerAgent')
 
@@ -29,7 +35,7 @@ class BattleTowerSearchSubAgent(BattleTowerAgent):
 
     strategy = 'move_select'
     def __init__(self, savestate_file: str, moves: int | list[int]):
-        super().__init__(render=False, savestate_file=savestate_file)
+        super().__init__(render=True, savestate_file=savestate_file)
 
         if isinstance(moves, int):
             moves = [moves]
@@ -96,7 +102,6 @@ def search_moves(savestate_file: str, moves: list[int], search_queue: Queue) -> 
     # if we chose a move and got thrown back to move_select, it means we couldn't choose that move so we should just stop the search
     elif state == TowerState.MOVE_SELECT:
         won = False
-        print('...wait I *am* being called correctly!')
     elif state == TowerState.END_OF_SET:
         state = agent._wait_for(
             (won_set, TowerState.WON_SET),
@@ -132,6 +137,10 @@ class BattleTowerSearchAgent(BattleTowerAgent):
 
         self.depth = depth
         self.strategy = f'search_depth_{depth}'
+
+        # on linux, desmume needs to use forkserver (maybe spawn is acceptable? haven't tested), but on windows, the default works just fine
+        self.mp_context = multiprocessing.get_context('spawn' if os.name == 'posix' else None)
+
         if team is None:
             self.team = """Garchomp @ Focus Sash  
 Ability: Sand Veil  
@@ -163,7 +172,7 @@ Adamant Nature
 
     def _select_move(self) -> int:
         savestate_file = uuid.uuid4().hex + '.dst'
-        savestate_path = os.path.join(SEARCH_TMP_SAVESTATE_DIR, savestate_file)
+        savestate_path = os.path.join(SEARCH_SAVESTATE_DIR, savestate_file)
         self.env.emu.savestate.save_file(savestate_path)
 
         if self.depth == 1:
@@ -181,7 +190,7 @@ Adamant Nature
         result_queue = Queue()
 
         for move_list in possible_moves:
-            p = Process(target=search_moves, args=(savestate_path, move_list, result_queue))
+            p = self.mp_context.Process(target=search_moves, args=(savestate_path, move_list, result_queue))
             search_processes.append(p)
             p.start()
 

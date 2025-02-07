@@ -24,7 +24,10 @@ logger = logging.getLogger('TowerAgent')
 
 ROM_DIR = 'ROM'
 
-BATTLE_TOWER_SAVESTATE = os.path.join(ROM_DIR, 'Pokemon - Platinum Battle Tower.dst')
+if os.name == 'nt': # windows
+    BATTLE_TOWER_SAVESTATE = os.path.join(ROM_DIR, 'Pokemon - Platinum Battle Tower.dst')
+else:
+    BATTLE_TOWER_SAVESTATE = os.path.join(ROM_DIR, 'Pokemon - Platinum Battle Tower Linux.dst')
 
 SEARCH_SAVESTATE_DIR = os.path.join(ROM_DIR, 'search')
 os.makedirs(SEARCH_SAVESTATE_DIR, exist_ok=True)
@@ -723,7 +726,7 @@ Adamant Nature
 
 if __name__ == '__main__':
     agent = BattleTowerAAgent(
-        render=False,
+        render=True,
         #db_interface=BattleTowerServerDBInterface()
     )
 
