@@ -86,7 +86,6 @@ def search_moves(savestate_file: str, moves: list[int], search_queue: Queue) -> 
     NOTE: this must be called in a new process or else Desmume will complain about already being initialized
     """
 
-    # I don't want any of the logging that the subagent creates, nor the output of desmume
     agent = BattleTowerSearchSubAgent(savestate_file, moves)
 
     try:
