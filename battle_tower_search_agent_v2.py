@@ -1,4 +1,5 @@
 import logging
+import multiprocessing
 import os
 import traceback
 import uuid
@@ -12,6 +13,7 @@ from battle_tower_agent import (
     TowerState,
     POKEMON_MAX_MOVES,
     NUM_POKEMON_IN_SINGLES,
+    SEARCH_SAVESTATE_DIR,
     in_battle,
     ROM_DIR,
     check_key_pixels,
@@ -26,8 +28,11 @@ from battle_tower_search_agent import InvalidMoveSelected
 from battle_tower_database.interface import BattleTowerDBInterface, BattleTowerServerDBInterface
 
 DEFAULT_MOVE = 0
-SEARCH_TEAM_SAVESTATE = os.path.join(ROM_DIR, 'Pokemon - Platinum Battle Tower Search Team.dst')
-SEARCH_TMP_SAVESTATE_DIR = os.path.join(ROM_DIR, 'search')
+
+if os.name == 'nt':
+    SEARCH_TEAM_SAVESTATE = os.path.join(ROM_DIR, 'Pokemon - Platinum Battle Tower Search Team.dst')
+else:
+    SEARCH_TEAM_SAVESTATE = os.path.join(ROM_DIR, 'Pokemon - Platinum Battle Tower Search Team Linux.dst')
 
 logger = logging.getLogger('SearchTowerAgent')
 logging.basicConfig(level=logging.DEBUG)
@@ -375,9 +380,11 @@ class BattleTowerSearchV2Agent(BattleTowerAgent):
         self.stop_event = Event()
         self.search_stop_barrier = Barrier(len(self.possible_moves) + 1) # The +1 is for this process
 
+        # on linux, desmume needs to use forkserver (maybe spawn is acceptable? haven't tested), but on windows, the default works just fine
+        ctx = multiprocessing.get_context('forkserver' if os.name == 'posix' else None)
         self.processes = []
         for i, move_list in enumerate(self.possible_moves):
-            p = Process(
+            p = ctx.Process(
                 target=init_search_process, # args look like savestate_queue, move_list, result_queue, stop_event, stop_barrier, and damage
                 args=(self.savestate_file_queues[i], move_list, self.result_queue, self.stop_event, self.search_stop_barrier, self.damage_values[i])
             )
@@ -398,7 +405,7 @@ class BattleTowerSearchV2Agent(BattleTowerAgent):
 
         if self.winning_move_list is None:
             savestate_file = uuid.uuid4().hex + '.dst'
-            savestate_path = os.path.join(SEARCH_TMP_SAVESTATE_DIR, savestate_file)
+            savestate_path = os.path.join(SEARCH_SAVESTATE_DIR, savestate_file)
             self.env.emu.savestate.save_file(savestate_path)
 
             logger.debug(f'Searching over {self.possible_moves}')
@@ -557,7 +564,7 @@ class BattleTowerSearchV2Agent(BattleTowerAgent):
 if __name__ == '__main__':
     agent = BattleTowerSearchV2Agent(
         render=False,
-        depth=2,
+        depth=1,
         db_interface=BattleTowerServerDBInterface()
     )
 
