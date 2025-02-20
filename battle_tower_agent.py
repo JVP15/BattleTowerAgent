@@ -80,7 +80,7 @@ def check_key_pixels(frame: np.ndarray, key_pixels, frame_is_bgr=True):
     """
     This is one way that I can determine states.
     I'll basically go frame by frame, check a lot of differet pixels to see if they match what I expect.
-    Also I expect the frame to be BGR (due to the way I load the data) but this can be configured
+    Also I expect the frame to be BGR (due to the way I load the data) but this can be configured.
     key_pixels is expected to be a list of list of lists that look like:
     [
         [[pixel_row, pixel_col], [pixel_r, pixel_g, pixel_b]],
@@ -214,6 +214,45 @@ def get_party_status(frame):
     ])
 
     return ~fainted_status
+
+def get_selected_pokemon_in_swap_screen(frame):
+    """
+    This function returns the slot number (from 0-5) of the pokemon that is being hovered in the swap screen.
+    Useful b/c sometimes just hitting the "right" button can be a little over-zealous and put us in an unexpected state.
+    It's also possible that there is no slot selected, in which case it returns None (indicating that you have to push A first)
+    """
+    selected_color = (248, 0, 0)
+
+    # there are arrows on each corner of the slot that is selected; these coordinates refer to those arrows in upper-left hand -> lower-right hand
+    slot_pixels = [
+        [ # this is for slot 0
+            [194, 2], [194, 125], [237, 2], [237, 125]
+        ],
+        [ # this is for slot 1
+            [201, 130], [201, 254], [245, 130], [245, 254]
+        ],
+        [ # slot 2
+            [243, 2], [243, 125], [285, 2], [285, 125]
+        ],
+        [ # slot 3
+            [250, 130], [250, 254], [294, 130], [294, 254]
+        ],
+        [ # slot 4
+            [292, 2], [292, 125], [331, 2], [331, 125]
+        ],
+        [ # slot 5
+            [298, 130], [298, 254], [341, 130], [341, 254]
+        ]
+    ]
+
+    matching_slot_id = None
+
+    for slot_id, slot_corners in enumerate(slot_pixels):
+        if check_key_pixels(frame, [[corner, selected_color] for corner in slot_corners]):
+            matching_slot_id = slot_id
+            break
+
+    return matching_slot_id
 
 class TowerState(Enum):
     WAITING = 0
@@ -619,20 +658,40 @@ class BattleTowerAgent:
 
         logger.info(f'A Pokemon has fainted, current party status: ' + ' | '.join([f'Slot {i+1} {"healthy" if status else "fainted"}' for i, status in enumerate(party_status)]))
 
-        swapped_pokemon = False
-        for i, slot_is_healthy in enumerate(party_status):
-            if slot_is_healthy: # once we get to a healthy Pokemon, we need to hit A twice to select it and send it out on the field
-                self._general_button_press('A')
-                self._general_button_press('A')
-                swapped_pokemon = True
-                logger.info(f'Swapping to slot {i}')
-                break
-            else:
-                self._general_button_press('RIGHT') # if the currently selected slot is fainted, we can try the next one by just hitting right
+        # swapped_pokemon = False
+        # for i, slot_is_healthy in enumerate(party_status):
+        #     if slot_is_healthy: # once we get to a healthy Pokemon, we need to hit A twice to select it and send it out on the field
+        #         self._general_button_press('A')
+        #         self._general_button_press('A')
+        #         swapped_pokemon = True
+        #         logger.info(f'Swapping to slot {i}')
+        #         break
+        #     else:
+        #         self._general_button_press('RIGHT') # if the currently selected slot is fainted, we can try the next one by just hitting right
+        #
+        # if not swapped_pokemon:
+        #     self._log_error_image(message='no_pokemon_to_swap')
+        #     raise ValueError("Something went wrong here. We should have found and swapped to a healthy Pokemon by now, but we couldn't find any healthy Pokemon")
 
-        if not swapped_pokemon:
-            self._log_error_image(message='no_pokemon_to_swap')
-            raise ValueError("Something went wrong here. We should have found and swapped to a healthy Pokemon by now, but we couldn't find any healthy Pokemon")
+        swap_slot = party_status.argmax()
+
+        selected_slot = get_selected_pokemon_in_swap_screen(self.cur_frame)
+        if selected_slot is None: # sometimes, we aren't automatically selecting any slot, which we can fix by hitting 'A'
+            self._general_button_press('A')
+            selected_slot = get_selected_pokemon_in_swap_screen(self.cur_frame)
+
+        # this will navigate us to the right slot #
+        while selected_slot != swap_slot:
+            if selected_slot < swap_slot:
+                self._general_button_press('RIGHT')
+            elif selected_slot > swap_slot:
+                self._general_button_press('LEFT')
+
+            selected_slot = get_selected_pokemon_in_swap_screen(self.cur_frame)
+
+        # once we get to the chosen pokemon, we have to hit A twice to select it and send it out on the field
+        self._general_button_press(['A', 'A'])
+        logger.info(f'Swapping to slot {swap_slot}')
 
     def _goto_move(self, move_idx: int):
         """
@@ -740,8 +799,8 @@ if __name__ == '__main__':
     #
     # emu = DeSmuME()
     # emu.open(ROM_FILE)
-    # emu.savestate.load_file('ROM\Pokemon - Platinum Battle Tower Search Team.dst')
-    # # emu.savestate.load_file('ROM\\14 Win Streak.dst')
+    # #emu.savestate.load_file('ROM\Pokemon - Platinum Battle Tower Search Team.dst')
+    # emu.savestate.load_file('ROM\\Hopefully Faint.dst')
     # emu.volume_set(0)
     #
     #
@@ -821,6 +880,7 @@ if __name__ == '__main__':
     #
     #     if pokemon_is_fainted(screen):
     #         print(get_party_status(screen))
+    #         print('Currently selecting slot # ', get_selected_pokemon_in_swap_screen(screen))
     #
     #     if is_next_opponent_box(screen):
     #         print('Next opp:', get_battle_number(screen))

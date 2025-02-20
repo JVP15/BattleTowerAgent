@@ -62,7 +62,10 @@ class PokemonEnv():
         self.include_botton_screen = include_bottom_screen
 
     def load_savestate(self, savestate_file):
-        self.emu.savestate.load_file(savestate_file)
+        if os.path.exists(savestate_file):
+            self.emu.savestate.load_file(savestate_file)
+        else:
+            raise ValueError('Could not find savestate file:', savestate_file)
 
     def step(self, action: str | None = None) -> np.ndarray:
         # it's just easier to clear all of the keys first and then set the ones we want instead of trying to figure out which ones are already set

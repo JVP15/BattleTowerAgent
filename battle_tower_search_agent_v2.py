@@ -22,7 +22,11 @@ from battle_tower_agent import (
     won_set,
     lost_set,
     pokemon_is_fainted,
-    get_party_status, in_move_select, is_next_opponent_box, at_save_battle_video,
+    get_party_status,
+    get_selected_pokemon_in_swap_screen,
+    in_move_select,
+    is_next_opponent_box,
+    at_save_battle_video,
 )
 
 from battle_tower_search_agent import InvalidMoveSelected
@@ -142,13 +146,14 @@ class BattleTowerSearchV2SubAgent(BattleTowerAgent):
         This is an "agent" that has been hacked and slashed apart to play the game halfway through a battle.
         This agent executes the actual search strategy, see BattleTowerSearchV2Agent for that strategy.
 
-        :param savestate_file: A path to a savestate file that the subagent will pick up the game from
-        :param moves: the list of moves that the subagent will execute in order (i.e. turn 1 it does move 0, turn 2 move 1, etc), can be a single move
-        :param stop_event: a multiprocessing event that tells the search subagent to stop searching immediately (used to implement early search stopping)
-        :param swap_to: before making a move, swap to the pokemon in that idx (can be none)
-        :damage_value: a multiprocessing Value used to keep track of the damage dealt thus far by the subagent
+        Args:
+            savestate_file: A path to a savestate file that the subagent will pick up the game from
+            moves: the list of moves that the subagent will execute in order (i.e. turn 1 it does move 0, turn 2 move 1, etc), can be a single move
+            stop_event: a multiprocessing event that tells the search subagent to stop searching immediately (used to implement early search stopping)
+            swap_to: before making a move, swap to the pokemon in that idx (can be none)
+            damage_value: a multiprocessing Value used to keep track of the damage dealt thus far by the subagent
         """
-        super().__init__(render=True, savestate_file=savestate_file)
+        super().__init__(render=False, savestate_file=savestate_file)
 
         if isinstance(moves, int):
             moves = [moves]
@@ -266,9 +271,10 @@ def init_search_process(
     while True:
         savestate_file = savestate_queue.get(block=True)
 
-        agent = BattleTowerSearchV2SubAgent(savestate_file, moves, swap_to=swap_to, stop_event=early_stop_event, damage_value=damage_value)
-
         try:
+            agent = BattleTowerSearchV2SubAgent(savestate_file, moves, swap_to=swap_to, stop_event=early_stop_event,
+                                                damage_value=damage_value)
+
             state = agent.play_remainder_of_battle()
         except (InvalidMoveSelected, #  this means we were unable to select a move in the search so we should just stop the search
                 SwappedPokemon, # this means we stopped the search early due to a pokemon fainting so we stopped the search early
@@ -387,6 +393,8 @@ class BattleTowerSearchV2Agent(BattleTowerAgent):
         self.winning_move_list = None
         self.winning_move_idx = 0
         self.pred_turns_to_win = 0
+
+        self.savestate_path = None
 
         # SPEED OPTIMIZATION: (over v1 agent) persistant process (this saves time both spooling up the process and also initing Desmume, which is slow)
         #  seems to be about 20% faster
@@ -526,28 +534,29 @@ class BattleTowerSearchV2Agent(BattleTowerAgent):
                 swap_slot = max_idx // NUM_POKEMON_IN_SINGLES + 1
                 logger.info(f'After exhausting all searches with a depth of {self.depth}, '
                             f'swapping to slot {swap_slot} leads to {max_damage} damage dealt.')
+
+                # this is very important to make sure that everything is synchronized
+                self._reset_search(swap=True)
+
         else:
             swap_slot = party_status.argmax()
 
+        selected_slot = get_selected_pokemon_in_swap_screen(self.cur_frame)
+        if selected_slot is None: # sometimes, we aren't automatically selecting any slot, which we can fix by hitting 'A'
+            self._general_button_press('A')
+            selected_slot = get_selected_pokemon_in_swap_screen(self.cur_frame)
+
         # this will navigate us to the right slot #
-        self._general_button_press(['RIGHT'] * swap_slot)
+        while selected_slot != swap_slot:
+            if selected_slot < swap_slot:
+                self._general_button_press('RIGHT')
+            elif selected_slot > swap_slot:
+                self._general_button_press('LEFT')
+
+            selected_slot = get_selected_pokemon_in_swap_screen(self.cur_frame)
+
         # once we get to the chosen pokemon, we have to hit A twice to select it and send it out on the field
         self._general_button_press(['A', 'A'])
-
-        # swapped_pokemon = False
-        # for i, slot_is_healthy in enumerate(party_status):
-        #     if slot_is_healthy: # once we get to a healthy Pokemon, we need to hit A twice to select it and send it out on the field
-        #         self._general_button_press('A')
-        #         self._general_button_press('A')
-        #         swapped_pokemon = True
-        #         logger.info(f'Swapping to slot {i}')
-        #         break
-        #     else:
-        #         self._general_button_press('RIGHT') # if the currently selected slot is fainted, we can try the next one by just hitting right
-
-        # if not swapped_pokemon:
-        #     self._log_error_image(message='no_pokemon_to_swap')
-        #     raise ValueError("Something went wrong here. We should have found and swapped to a healthy Pokemon by now, but we couldn't find any healthy Pokemon")
 
     def _damage_argmax(self, damage_values):
         max_idx = -1
@@ -563,13 +572,15 @@ class BattleTowerSearchV2Agent(BattleTowerAgent):
     def _do_search(self, savestate_queue, processes, damage_values):
         """This implements the search algorithm and returns the best result; it is agnostic enough to be used to select moves and also swap pokemon"""
         savestate_file = uuid.uuid4().hex + '.dst'
-        savestate_path = os.path.join(SEARCH_SAVESTATE_DIR, savestate_file)
-        self.env.emu.savestate.save_file(savestate_path)
+
+        # NOTE: I used to also delete the savestate file after searching, but then I kept getting weird synchronization issues around savestates so I stopped that
+        self.savestate_path = os.path.join(SEARCH_SAVESTATE_DIR, savestate_file)
+        self.env.emu.savestate.save_file(self.savestate_path)
 
         # see class docstring for the search algorithm here
         # this kicks off the search; each process will consume the savestate file and begin the search agent
         for q in savestate_queue:
-            q.put(savestate_path, block=True)
+            q.put(self.savestate_path, block=True)
 
         best_result = None
         completed_searches = 0
@@ -602,10 +613,6 @@ class BattleTowerSearchV2Agent(BattleTowerAgent):
             self.stop_event.set()
 
         logger.debug(f'Damage values at the end of the search: {[v.value for v in damage_values]}')
-
-        # it's polite to clean up the savestate dir after finishing the search
-        if os.path.exists(savestate_path):
-            os.remove(savestate_path)
 
         return best_result
 
@@ -646,6 +653,12 @@ class BattleTowerSearchV2Agent(BattleTowerAgent):
 
         self.stop_event.clear()
 
+        # it's polite to clean up the savestate dir after finishing the search
+        # NOTE: this used to be in _search, but I kept getting issues like "could not load savestate" that I think are
+        #  caused by synchronization issues so I moved it here.
+        if os.path.exists(self.savestate_path):
+            os.remove(self.savestate_path)
+
     def _reset_winning_moves(self):
         """This function is used to clear the movelist that we follow when we found a winner."""
         self.winning_move_list = None
@@ -654,9 +667,9 @@ class BattleTowerSearchV2Agent(BattleTowerAgent):
 
 if __name__ == '__main__':
     agent = BattleTowerSearchV2Agent(
-        render=True,
+        render=False,
         depth=1,
-        #db_interface=BattleTowerServerDBInterface()
+        db_interface=BattleTowerServerDBInterface()
     )
 
     agent.play()
