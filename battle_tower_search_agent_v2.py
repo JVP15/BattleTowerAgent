@@ -193,8 +193,21 @@ class BattleTowerSearchV2SubAgent(BattleTowerAgent):
             self._log_error_image(message='not_in_swap_screen')
             raise ValueError("Something went wrong here. We are supposed to swap Pokemon but we aren't in the pokemon swap screen")
         elif self.swap_to:
-            # we can hit the right arrow until we hover over the correct slot
-            self._general_button_press(['RIGHT'] * self.swap_to)
+            selected_slot = get_selected_pokemon_in_swap_screen(self.cur_frame)
+            if selected_slot is None:  # sometimes, we aren't automatically selecting any slot, which we can fix by hitting 'A'
+                self._general_button_press('A')
+                selected_slot = get_selected_pokemon_in_swap_screen(self.cur_frame)
+
+            # this will navigate us to the right slot #
+            while selected_slot != self.swap_to:
+                if selected_slot < self.swap_to:
+                    self._general_button_press('RIGHT')
+                elif selected_slot > self.swap_to:
+                    self._general_button_press('LEFT')
+
+                selected_slot = get_selected_pokemon_in_swap_screen(self.cur_frame)
+
+            # once we get to the chosen pokemon, we have to hit A twice to select it and send it out on the field
             self._general_button_press(['A', 'A'])
 
             self.state = self._wait_for(
@@ -557,6 +570,7 @@ class BattleTowerSearchV2Agent(BattleTowerAgent):
 
         # once we get to the chosen pokemon, we have to hit A twice to select it and send it out on the field
         self._general_button_press(['A', 'A'])
+        logger.info(f'Swapping to slot {swap_slot}')
 
     def _damage_argmax(self, damage_values):
         max_idx = -1
