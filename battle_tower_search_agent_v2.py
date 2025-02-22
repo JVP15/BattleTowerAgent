@@ -637,6 +637,13 @@ class BattleTowerSearchV2Agent(BattleTowerAgent):
           we can control what we are waiting for with the flags.
         """
 
+        # once all processes, successfully add their results to the queue, this will pass
+        #  and we can clean up the queue, damages, and event and be on with our day
+        if battle:
+            self.search_stop_barrier.wait()
+        if swap:
+            self.swap_stop_barrier.wait()
+
         # this likely won't be necessary, but I can imagine a situation where the processor is all locked up and so
         #  by the search process ends, we haven't even pulled the savestate file from the queue
         for file_queue in self.savestate_file_queues:
@@ -646,14 +653,6 @@ class BattleTowerSearchV2Agent(BattleTowerAgent):
         for file_queue in self.swap_savestate_file_queues:
             while not file_queue.empty():
                 file_queue.get()
-
-        # once all processes, successfully add their results to the queue, this will pass
-        #  and we can clean up the queue, damages, and event and be on with our day
-
-        if battle:
-            self.search_stop_barrier.wait()
-        if swap:
-            self.swap_stop_barrier.wait()
 
         while not self.result_queue.empty():
             self.result_queue.get()
