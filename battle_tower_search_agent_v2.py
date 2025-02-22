@@ -548,8 +548,8 @@ class BattleTowerSearchV2Agent(BattleTowerAgent):
                 logger.info(f'After exhausting all searches with a depth of {self.depth}, '
                             f'swapping to slot {swap_slot} leads to {max_damage} damage dealt.')
 
-                # this is very important to make sure that everything is synchronized
-                self._reset_search(swap=True)
+            # this is very important to make sure that everything is synchronized
+            self._reset_search(swap=True)
 
         else:
             swap_slot = party_status.argmax()
