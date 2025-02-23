@@ -1,13 +1,12 @@
+import pathlib
 import time
-import uuid
-
 
 import cv2
 import numpy as np
 import os
 import datetime
 
-from battle_tower_database.interface import BattleTowerDBInterface, BattleTowerServerDBInterface
+from battle_tower_agent.battle_tower_database.interface import BattleTowerDBInterface, BattleTowerServerDBInterface
 from pokemon_env import PokemonEnv
 
 from enum import Enum
@@ -22,7 +21,9 @@ logging.addLevelName(logging.BUTTON_PRESS, 'BUTTON_PRESS')
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger('TowerAgent')
 
-ROM_DIR = 'ROM'
+# roms should be in BattleTowerAgent/ROMS, and we should be in BattleTowerAgent/battle_tower_agent/agent.py
+ROOT_DIR = pathlib.Path(__file__).parent.parent.resolve()
+ROM_DIR = os.path.join(ROOT_DIR, 'ROM')
 
 if os.name == 'nt': # windows
     BATTLE_TOWER_SAVESTATE = os.path.join(ROM_DIR, 'Pokemon - Platinum Battle Tower.dst')
@@ -36,8 +37,7 @@ os.makedirs(SEARCH_SAVESTATE_DIR, exist_ok=True)
 BUTTON_PRESS_DURATION = 5
 AFTER_PRESS_WAIT = 30 # I have no good justification for this, we just need to spend some amount of time waiting for the game to process our input
 
-
-REF_IMG_DIR = os.path.join('images', 'references')
+REF_IMG_DIR = os.path.join(ROOT_DIR, 'images', 'references')
 
 BATTLE_TOWER_STREAK_LENGTH = 7
 NUM_POKEMON_IN_SINGLES = 3 # in case I ever want to do doubles, I'm setting this now
@@ -281,6 +281,16 @@ class BattleTowerAgent:
     team: str = None # NOTE: this should ideally be a Showdown-compatible format
 
     def __init__(self, render=True, savestate_file=BATTLE_TOWER_SAVESTATE, db_interface: BattleTowerDBInterface = None):
+        """
+        Creates the (Abstract) Battle Tower Agent.
+        The strategy is to just search over all available moves until the end of the battle.
+        Args:
+            render: Whether to display the battle as it's going on.
+            savestate_file: The initial savestate file that the agent loads the game from.
+                There is a somewhat intricate setup needed to run the agent, so I don't recommend changing this.
+            db_interface: A BattleTowerDB Interface, letting the agent record it's stats to a DB as it is playing
+                (by default it is None, so it won't  record anything).
+        """
         self.env = PokemonEnv(
             include_bottom_screen=True,
             savestate_files=[savestate_file],
@@ -658,21 +668,6 @@ class BattleTowerAgent:
 
         logger.info(f'A Pokemon has fainted, current party status: ' + ' | '.join([f'Slot {i+1} {"healthy" if status else "fainted"}' for i, status in enumerate(party_status)]))
 
-        # swapped_pokemon = False
-        # for i, slot_is_healthy in enumerate(party_status):
-        #     if slot_is_healthy: # once we get to a healthy Pokemon, we need to hit A twice to select it and send it out on the field
-        #         self._general_button_press('A')
-        #         self._general_button_press('A')
-        #         swapped_pokemon = True
-        #         logger.info(f'Swapping to slot {i}')
-        #         break
-        #     else:
-        #         self._general_button_press('RIGHT') # if the currently selected slot is fainted, we can try the next one by just hitting right
-        #
-        # if not swapped_pokemon:
-        #     self._log_error_image(message='no_pokemon_to_swap')
-        #     raise ValueError("Something went wrong here. We should have found and swapped to a healthy Pokemon by now, but we couldn't find any healthy Pokemon")
-
         swap_slot = party_status.argmax()
 
         selected_slot = get_selected_pokemon_in_swap_screen(self.cur_frame)
@@ -782,15 +777,15 @@ Adamant Nature
         return 0
 
 
-
 if __name__ == '__main__':
     agent = BattleTowerAAgent(
         render=True,
-        #db_interface=BattleTowerServerDBInterface()
+        db_interface=BattleTowerServerDBInterface()
     )
 
     agent.play()
 
+    # NOTE: this is my debug stuff
     # from pokemon_env import *
     # import keyboard
     # import win32api
@@ -799,8 +794,7 @@ if __name__ == '__main__':
     #
     # emu = DeSmuME()
     # emu.open(ROM_FILE)
-    # #emu.savestate.load_file('ROM\Pokemon - Platinum Battle Tower Search Team.dst')
-    # emu.savestate.load_file('ROM\\Hopefully Faint.dst')
+    # #emu.savestate.load_file('..\..\ROM\Pokemon - Platinum Battle Tower Search Team.dst')
     # emu.volume_set(0)
     #
     #

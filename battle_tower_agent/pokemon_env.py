@@ -1,3 +1,5 @@
+import pathlib
+
 import numpy as np
 import cv2
 import os
@@ -5,9 +7,13 @@ import os
 from desmume.emulator import DeSmuME, SCREEN_PIXEL_SIZE, SCREEN_PIXEL_SIZE_BOTH, SCREEN_WIDTH, SCREEN_HEIGHT, SCREEN_HEIGHT_BOTH
 from desmume.controls import Keys, keymask
 
-ROM_FILE = os.path.join('ROM', 'Pokemon - Platinum.nds')
+ROOT_DIR = pathlib.Path(__file__).parent.parent.resolve()
+
+ROM_DIR = os.path.join(ROOT_DIR, 'ROM')
+ROM_FILE = os.path.join(ROM_DIR, 'Pokemon - Platinum.nds')
+
 SAVESTATE_FILES = [
-    os.path.join('ROM', 'Pokemon - Platinum.ds1')
+    os.path.join(ROM_DIR, 'Pokemon - Battle Tower.dst')
 ]
 
 CYCLES_PER_STEP = 60 # the game goes at 60 FPS, so this means each step will last at minimum 1 second to handle any effects
@@ -18,8 +24,7 @@ EMU = None # we're only allowed to have one emulator per process
 
 class PokemonEnv():
     """
-    Creates an environment to run the Pokemon Platinum. 
-    Note: while it does have many similarities to the gym spec, it is not compatible (specifically due to changes w/ how rendering works)
+    Creates an environment to run Pokemon Platinum using py-desmume
     """
 
     button_to_key = {
@@ -39,10 +44,10 @@ class PokemonEnv():
 
 
     def __init__(
-            self, 
+            self,
             include_bottom_screen=False,
             rom_file=ROM_FILE, 
-            savestate_files=SAVESTATE_FILES, 
+            savestate_files=SAVESTATE_FILES,
         ):
 
         global EMU
@@ -109,6 +114,7 @@ class PokemonClient:
     """
     This is a wrapper around the Pokemon env that handles some things, in particular holding down a button for long enough for an action to complete
     (since you need to hold the D-pad or else it will only rotate the character instead of moving the character)
+    This is a legacy class that I have for Gemini to interact directly w/ the Pokemon game. That's for another project though...
     """
 
     def __init__(
@@ -193,43 +199,14 @@ class PokemonClient:
 
 
 if __name__ == '__main__':
-    # env = PokemonClient(render_screen=True, include_bottom_screen=False, savestate_files=['ROM\Pokemon - Platinum Battle Tower.dst'])
-    # env.reset()
-    #
-    # while True:
-    #     # env.step('RIGHT')
-    #     action = input('Enter Action:')
-    #
-    #     if action.upper().strip() == 'Q':
-    #         break
-    #
-    #     env.step(action)
-
-    # from desmume.emulator import DeSmuME
-    #
-    # emu = DeSmuME()
-    # emu.open(ROM_FILE)
-    # emu.savestate.load_file('ROM\Pokemon - Platinum Battle Tower.dst')
-
-    # Create the window for the emulator
-    # window = emu.create_sdl_window()
-    # import time
-    # # Run the emulation as fast as possible until quit
-    # while not window.has_quit():
-    #     emu.input.keypad_rm_key(Keys.NO_KEY_SET)
-    #
-    #     window.process_input()  # Controls are the default DeSmuME controls, see below.
-    #     emu.cycle()
-    #     window.draw()
-    #
-    #     time.sleep(.01)
+    # DEBUG CODE to make sure py desume works
     import keyboard
     import win32api
     import win32gui
 
     emu = DeSmuME()
     emu.open(ROM_FILE)
-    emu.savestate.load_file('ROM\Pokemon - Platinum Battle Tower.dst')
+    emu.savestate.load_file('..\..\ROM\Pokemon - Platinum Battle Tower.dst')
     emu.volume_set(0)
 
     # Create the window for the emulator
@@ -262,7 +239,7 @@ if __name__ == '__main__':
                 emu.input.keypad_rm_key(keymask(emulated_button))
 
         if keyboard.is_pressed('t'):
-            image_path = os.path.join('images', 'Decision Making', input('Enter image path:') + '.PNG')
+            image_path = os.path.join('../../images', 'Decision Making', input('Enter image path:') + '.PNG')
             screen_buffer = emu.display_buffer_as_rgbx()
             screen_pixels = np.frombuffer(screen_buffer, dtype=np.uint8)
             screen = screen_pixels[:SCREEN_PIXEL_SIZE_BOTH * 4]

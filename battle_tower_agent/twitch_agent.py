@@ -1,8 +1,8 @@
 import logging
 from multiprocessing import Queue
 
-from battle_tower_agent import BattleTowerAAgent, BATTLE_TOWER_SAVESTATE, BUTTON_PRESS_DURATION, AFTER_PRESS_WAIT
-from battle_tower_database.interface import BattleTowerDBInterface
+from battle_tower_agent.agent import BattleTowerAAgent, BATTLE_TOWER_SAVESTATE, BUTTON_PRESS_DURATION, AFTER_PRESS_WAIT
+from battle_tower_agent.battle_tower_database.interface import BattleTowerDBInterface
 
 logger = logging.getLogger('TwitchAgent')
 

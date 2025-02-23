@@ -1,17 +1,15 @@
 import logging
 import multiprocessing
 import os
-import traceback
 import uuid
 
 from dataclasses import dataclass
-from multiprocessing import Pool, Queue, Process, Value, Event, Barrier
+from multiprocessing import Queue, Value, Event, Barrier
 
 import numpy as np
 
-from battle_tower_agent import (
+from battle_tower_agent.agent import (
     BattleTowerAgent,
-    BattleTowerAAgent,
     TowerState,
     POKEMON_MAX_MOVES,
     NUM_POKEMON_IN_SINGLES,
@@ -29,9 +27,9 @@ from battle_tower_agent import (
     at_save_battle_video,
 )
 
-from battle_tower_search_agent import InvalidMoveSelected
+from search_agent import InvalidMoveSelected
 
-from battle_tower_database.interface import BattleTowerDBInterface, BattleTowerServerDBInterface
+from battle_tower_agent.battle_tower_database.interface import BattleTowerDBInterface, BattleTowerServerDBInterface
 
 DEFAULT_MOVE = 0
 
@@ -358,6 +356,33 @@ Adamant Nature
 - Superpower""" # normally I do rest suicune, but I don't want to play a battle out crazy long just spamming rest
 
 class BattleTowerSearchV2Agent(BattleTowerAgent):
+    """
+    V2 Strategy:
+    1. Only search until current Pokemon faints
+      * If current Pokemon selects a winning move combination, go with that (or maybe 1 more move just to confirm)
+      * If there is no winning combination, use the total amount of damage they did before fainting and use that to determine which move to take
+      * [WON'T BE IMPLEMENTED] if there is no winning move, try swapping to a different Pokemon and seeing how effective it is w/ search_depth=1
+    2. Whenever we swap, if there are two options, do a search for each of them
+      * [NOT IMPLEMENTED YET] search_whatever can have the move combo and also swap=None, 1, or 2
+      * [NOT IMPLEMENTED YET] also check this at the beginning of the game? Maybe the lead pokemon is not good against the opponent's lead
+    3. We may stop searching before all moves have been fully searched. Whenever a search returns, we check:
+      1. If that search won the battle, we immediately stop.
+      2. If that search didn't win the battle, we check whether it is the highest-damaging search *at that wall-clock time of the search*
+         * If that move's damage is higher than anything else at that point, we stop searching and go with it
+         * Otherwise, we keep waiting.
+         * It's possible that a different move will lead to a larger damage overall, just take more time,
+           but w/ the current moveset of each Pokemon, that's unlikely (in a sense, it's a tradeoff of time vs accuracy)
+    4. If we've found a win, we will stop searching and then go w/ the list of moves selected there.
+        * This is a bit of a tradeoff b/w speed and performance, but if we've found a win, we're likly only a turn or two away anyways
+        * If we have to swap pokemon, this gets reset, which helps in case we thought we won but in fact something changed.
+        * Since we also keep track of how many turns the battle *should* take, we can do a reset if it ends up suprising us
+    5. Limit the search depth to 10 turns (which is a reasonable depth)
+      b/c if we search for 20 turns, it isn't likely that we'll find a better move vs just searching for 10 turns.
+        * This also synergizes well w/ the "stop searching on found win" b/c we may win and PP stall after 20 turns
+        (by "may" I mean we *have*) but this will prevent it.
+
+    These additions have lead to *major* gains in speed over the v1 search agent, and also lead to longer streaks.
+    """
 
     def __init__(self,
         render=False,
@@ -367,31 +392,20 @@ class BattleTowerSearchV2Agent(BattleTowerAgent):
         team=GARCHOMP_SUICUNE_SCIZOR_TEAM,
     ):
         """
-        V2 Strategy:
-        1. Only search until current Pokemon faints
-          * If current Pokemon selects a winning move combination, go with that (or maybe 1 more move just to confirm)
-          * If there is no winning combination, use the total amount of damage they did before fainting and use that to determine which move to take
-          * [OPTIONAL] if there is no winning move, try swapping to a different Pokemon and seeing how effective it is w/ search_depth=1
-        2. Whenever we swap, if there are two options, do a search for each of them
-          * [OPTIONAL] search_whatever can have the move combo and also swap=None, 1, or 2
-          * [OPTIONAL] also check this at the beginning of the game? Maybe the lead pokemon is not good against the opponent's lead
-        3. We may stop searching before all moves have been fully searched. Whenever a search returns, we check:
-          1. If that search won the battle, we immediately stop.
-          2. If that search didn't win the battle, we check whether it is the highest-damaging search *at that wall-clock time of the search*
-             * If that move's damage is higher than anything else at that point, we stop searching and go with it
-             * Otherwise, we keep waiting.
-             * It's possible that a different move will lead to a larger damage overall, just take more time,
-               but w/ the current moveset of each Pokemon, that's unlikely (in a sense, it's a tradeoff of time vs accuracy)
-        4. If we've found a win, we will stop searching and then go w/ the list of moves selected there.
-            * This is a bit of a tradeoff b/w speed and performance, but if we've found a win, we're likly only a turn or two away anyways
-            * If we have to swap pokemon, this gets reset, which helps in case we thought we won but in fact something changed.
-            * Since we also keep track of how many turns the battle *should* take, we can do a reset if it ends up suprising us
-        5. [OPTIONAL] limit the search depth to 10 turns (or however many turns it takes for toxic to KO + 1)
-          b/c if we search for 20 turns, it isn't likely that we'll find a better move vs just searching for 10 turns (it actually takes 6 rounds for toxic to KO)
-            * This also synergizes well w/ the "stop searching on found win" b/c we may win and PP stall after 20 turns (by "may" I mean we *have*)
-                but this will prevent it.
+        Creates the Battle Tower Search Agent (v2).
+        See the class docstring for the strategy.
 
-        depth is how many combinations of moves that we'll try, although it's more like a class than an actual # of steps we'll go down the tree
+        Args:
+            render: Whether to display the battle as it's going on.
+            savestate_file: The initial savestate file that the agent loads the game from.
+                There is a somewhat intricate setup needed to run the agent, so I don't recommend changing this.
+            db_interface: A BattleTowerDB Interface, letting the agent record it's stats to a DB as it is playing
+                (by default it is None, so it won't  record anything).
+            depth: how many combinations of moves that we'll try, although it's more like a class than an actual # of steps we'll go down the tree
+                If depth is 1 or 2, it's all possible permutations of move 1 or 2 nodes down the tree.
+                Actually, only depths of 1 and 2 are supported.
+            team: The team (in Pokemon Showdown format) used in the battle tower.
+                By default, goes with the team that is chosen with the default savestate.
         """
         super().__init__(render, savestate_file, db_interface)
 
@@ -426,6 +440,7 @@ class BattleTowerSearchV2Agent(BattleTowerAgent):
         self.search_stop_barrier = Barrier(len(self.possible_moves) + 1) # The +1 is for this process
 
         # on linux, desmume needs to use forkserver (maybe spawn is acceptable? haven't tested), but on windows, the default works just fine
+        # TODO: this doesn't work yet
         ctx = multiprocessing.get_context('forkserver' if os.name == 'posix' else None)
         self.processes = []
         for i, move_list in enumerate(self.possible_moves):
@@ -436,7 +451,8 @@ class BattleTowerSearchV2Agent(BattleTowerAgent):
             self.processes.append(p)
             p.start()
 
-        # we basically re-create everything above (except for the stop event) seperately for searching over swapped pokemon b/c there are only certain conditions to search for swaps
+        # we basically re-create everything above (except for the stop event)
+        # seperately for searching over swapped pokemon b/c there are only certain conditions to search for swaps
         num_swap_searches = len(self.possible_moves) * (NUM_POKEMON_IN_SINGLES - 1)
         self.swap_damage_values = [Value('i', 0) for _ in range(num_swap_searches)]
         self.swap_savestate_file_queues = [Queue() for _ in range(num_swap_searches)]
@@ -680,117 +696,9 @@ class BattleTowerSearchV2Agent(BattleTowerAgent):
 
 if __name__ == '__main__':
     agent = BattleTowerSearchV2Agent(
-        render=False,
+        render=True,
         depth=1,
         db_interface=BattleTowerServerDBInterface()
     )
 
     agent.play()
-    #
-    # from battle_tower_agent import *
-    # from pokemon_env import *
-    # import keyboard
-    # import win32api
-    # import win32gui
-    # import time
-    #
-    # emu = DeSmuME()
-    # emu.open(ROM_FILE)
-    # emu.savestate.load_file('ROM\Pokemon - Platinum Battle Tower Search Team.dst')
-    # # emu.savestate.load_file('ROM\\14 Win Streak.dst')
-    # emu.volume_set(0)
-    #
-    #
-    # # Create the window for the emulator
-    # window = emu.create_sdl_window()
-    #
-    # # Get handle for desmume sdl window
-    # window_handle = win32gui.FindWindow(None, "Desmume SDL")
-    #
-    # checks = [
-    #     is_dialog_box,
-    #     is_save_dialog,
-    #     is_save_overwrite_dialog,
-    #     in_pokemon_select,
-    #     is_ready_for_battle_tower,
-    #     pokemon_is_fainted,
-    #     in_battle,
-    #     is_next_opponent_box,
-    #     won_set,
-    #     at_save_battle_video,
-    #     lost_set,
-    #     in_move_select,
-    # ]
-    #
-    # CONTROLS = {
-    #     "enter": Keys.KEY_START,
-    #     "right shift": Keys.KEY_SELECT,
-    #     "q": Keys.KEY_L,
-    #     "w": Keys.KEY_R,
-    #     "a": Keys.KEY_Y,
-    #     "s": Keys.KEY_X,
-    #     "x": Keys.KEY_A,
-    #     "z": Keys.KEY_B,
-    #     "up": Keys.KEY_UP,
-    #     "down": Keys.KEY_DOWN,
-    #     "right": Keys.KEY_RIGHT,
-    #     "left": Keys.KEY_LEFT,
-    # }
-    #
-    # self_opp_pkmn = None
-    # self_damage_dealt = 0
-    # self_opp_hp = None
-    #
-    #
-    # while not window.has_quit():
-    #     # Check if any buttons are pressed and process them
-    #     # I like to just whipe all keys first so that I don't have to worry about removing keys or whatnot
-    #     emu.input.keypad_rm_key(Keys.NO_KEY_SET)
-    #
-    #     for key, emulated_button in CONTROLS.items():
-    #         if keyboard.is_pressed(key):
-    #             emu.input.keypad_add_key(keymask(emulated_button))
-    #         else:
-    #             emu.input.keypad_rm_key(keymask(emulated_button))
-    #
-    #     screen_buffer = emu.display_buffer_as_rgbx()
-    #     screen_pixels = np.frombuffer(screen_buffer, dtype=np.uint8)
-    #     screen = screen_pixels[:SCREEN_PIXEL_SIZE_BOTH * 4]
-    #     screen = screen.reshape((SCREEN_HEIGHT_BOTH, SCREEN_WIDTH, 4))[..., :3]  # drop the alpha channel
-    #
-    #     if keyboard.is_pressed('t'):
-    #         image_path = os.path.join('images', 'Decision Making', input('Enter image path:') + '.PNG')
-    #
-    #         cv2.imwrite(image_path, screen)
-    #
-    #     # Check if touch screen is pressed and process it
-    #     if win32api.GetKeyState(0x01) < 0:
-    #         # Get coordinates of click relative to desmume window
-    #         x, y = win32gui.ScreenToClient(window_handle, win32gui.GetCursorPos())
-    #         # Adjust y coord to account for clicks on top (non-touch) screen
-    #         y -= SCREEN_HEIGHT
-    #
-    #         if x in range(0, SCREEN_WIDTH) and y in range(0, SCREEN_HEIGHT):
-    #             emu.input.touch_set_pos(x, y)
-    #         else:
-    #             emu.input.touch_release()
-    #     else:
-    #         emu.input.touch_release()
-    #
-    #     for check in checks:
-    #         if check(screen):
-    #             print(f'{check.__name__}: {check(screen)}')
-    #
-    #     if pokemon_is_fainted(screen):
-    #         print(get_party_status(screen))
-    #
-    #     if in_move_select(screen):
-    #         opp_hp = get_opponent_hp_bar(screen)
-    #         opp_pkmn = get_opponent_pokemon_name(screen)
-    #
-    #
-    #     if is_next_opponent_box(screen):
-    #         print('Next opp:', get_battle_number(screen))
-    #
-    #     emu.cycle()
-    #     window.draw()

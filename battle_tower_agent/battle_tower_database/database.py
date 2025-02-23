@@ -3,6 +3,7 @@ import datetime
 import os
 import pathlib
 
+# I like the idea that the default DB path just points to this folder
 DATA_DIR = pathlib.Path(__file__).parent.resolve()
 DB_PATH = os.path.join(DATA_DIR, 'battle_tower.db')
 

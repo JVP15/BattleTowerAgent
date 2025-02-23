@@ -1,22 +1,18 @@
 import logging
 import multiprocessing
 import os
-import time
 import uuid
-from multiprocessing import Pool, Queue, Process
+from multiprocessing import Queue
 
-import numpy as np
-
-from battle_tower_agent import (
+from battle_tower_agent.agent import (
     BattleTowerAgent,
-    BattleTowerAAgent,
     TowerState,
     POKEMON_MAX_MOVES,
     in_battle, ROM_DIR, won_set, lost_set,
     SEARCH_SAVESTATE_DIR,
 )
 
-from battle_tower_database.interface import BattleTowerDBInterface, BattleTowerServerDBInterface
+from battle_tower_agent.battle_tower_database.interface import BattleTowerDBInterface
 
 DEFAULT_MOVE = 0
 
@@ -128,9 +124,19 @@ class BattleTowerSearchAgent(BattleTowerAgent):
         team=None,
     ):
         """
-        TODO: write the rest of this docstring
-        depth is how many combinations of moves that we'll try, although it's more like a class than an actual # of steps we'll go down the tree
-        If depth is 1 or 2, it's all possible permutations of move 1 or 2 nodes down the tree. If depth is 3, we also include swapping Pokemon
+        Creates the Battle Tower Search Agent (v1).
+        The strategy is to just search over all available moves until the end of the battle.
+        Args:
+            render: Whether to display the battle as it's going on.
+            savestate_file: The initial savestate file that the agent loads the game from.
+                There is a somewhat intricate setup needed to run the agent, so I don't recommend changing this.
+            db_interface: A BattleTowerDB Interface, letting the agent record it's stats to a DB as it is playing
+                (by default it is None, so it won't  record anything).
+            depth: how many combinations of moves that we'll try, although it's more like a class than an actual # of steps we'll go down the tree
+                If depth is 1 or 2, it's all possible permutations of move 1 or 2 nodes down the tree.
+                Actually, only depths of 1 and 2 are supported.
+            team: The team (in Pokemon Showdown format) used in the battle tower.
+                If none, goes with the team that is chosen with the default savestate.
         """
         super().__init__(render, savestate_file, db_interface)
 

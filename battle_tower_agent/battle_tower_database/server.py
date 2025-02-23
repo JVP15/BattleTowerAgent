@@ -1,5 +1,5 @@
 from flask import Flask, request, jsonify
-from battle_tower_database.database import BattleTowerDatabase, DB_PATH
+from battle_tower_agent.battle_tower_database.database import BattleTowerDatabase, DB_PATH
 
 # I don't really know how to make servers or Flask very well so I'm also relying on AI assistance here
 app = Flask(__name__)
