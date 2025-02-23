@@ -749,10 +749,7 @@ class BattleTowerAgent:
         cv2.imwrite(os.path.join(log_dir, log_fname), self.cur_frame)
 
 
-class BattleTowerAAgent(BattleTowerAgent):
-    strategy = 'A'
-    # TODO: come up with a different way to store/load this
-    team = """Garchomp @ Focus Sash  
+GARCHOM_SUICUNE_SCIZOR_TEAM = """Garchomp @ Focus Sash  
 Ability: Sand Veil  
 EVs: 4 HP / 252 Atk / 252 Spe  
 Jolly Nature  
@@ -769,8 +766,11 @@ Ability: Technician
 EVs: 252 HP / 252 Atk / 4 SpD  
 Adamant Nature  
 - Bullet Punch  
-
 """
+
+class BattleTowerAAgent(BattleTowerAgent):
+    strategy = 'A'
+    team = GARCHOM_SUICUNE_SCIZOR_TEAM
 
     def _select_move(self) -> int:
         # the 'A' agent always tries to select the first move
