@@ -24,6 +24,8 @@ python run.py --strategy a --render
 * `--strategy a`: This launches the Battle Tower Agent using the Only A strategy, which only ever hits the A button in the battle tower.. You can swap 'a' for `search_v1` or `search_v2` to try the other agents (see Agents for details).
 * `--render`: By default, the agents are headless, i.e. there is no UI, but this renders the battles. NOTE: this slows down battling by about 50%, so if you are just going for a long streak, don't use it.
 
+### Database Server:
+
 Each Battle Tower Agent keeps track of its current streak length and best streak, but when the agent stops, all progress is lost. 
 The agent can save its progress to a database, which can be later queried for stats and plots. To run the database server, do:
 ```bash
@@ -35,6 +37,8 @@ This will start up a flask server for the DB. Now, in another terminal, run the 
 ```bash
 python run.py --strategy search_v2 --log-db
 ```
+
+### Visualizing the Results:
 
 Now one *could* open up a SQL terminal or python script, write a bunch of queries yourself, and then code up some plots to visualize the results of the Battle Tower Agents,
 but that's a lot of work that I don't want to do. So I wrote a shell that uses Gemini to do it for you. You can run:
@@ -55,7 +59,7 @@ or create a `.env` file in the root directory (i.e. under `BattleTowerAgent`, sa
 It is possible that Gemini can write harmful code (although I haven't seen anything like that in testing) 
 that *gets automatically executed* so just keep that in mind as you prompt it.
 
-**Other Useful Options:**
+### Other Useful Options:
 * `--log-level`: The Battle Tower Agent has verbose logging (based on `logging` levels, including an extra one called `BUTTON_PRESS` that logs *every single button press by the agent).
 By default it is `INFO`, but set it to `DEBUG` if you want to see extra info about each state the agent reaches.
 * `--gemini-model-name`: If you want to specify the Gemini model that you're using to run stats and visualize the DB. 
