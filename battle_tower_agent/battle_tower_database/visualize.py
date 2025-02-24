@@ -1,3 +1,4 @@
+import pathlib
 import re
 import sqlite3
 import matplotlib.pyplot as plt
@@ -6,14 +7,13 @@ import google.generativeai as genai
 import os
 
 import dotenv
-dotenv.load_dotenv('../../.env')
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+# we expect the .env in BattleTowerAgent/.env
+ROOT_DIR = pathlib.Path(__file__).parent.parent.parent.resolve()
 
-genai.configure(api_key=GEMINI_API_KEY)
+dotenv.load_dotenv(os.path.join(ROOT_DIR, '.env'))
 
 MODEL_NAME = 'gemini-2.0-flash-thinking-exp-01-21'
-MODEL_NAME = 'gemini-exp-1206'
 
 SCHEMA = """TABLES:
 streaks:
@@ -55,10 +55,20 @@ Write a python script that loads the necessary data from the database (using the
 """
 
 
-def run_terminal_loop(cursor):
+def run_terminal_loop(cursor, model_name):
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+    print(f'{ROOT_DIR=}')
+    print(os.path.join(ROOT_DIR, '.env'))
 
-    model = genai.GenerativeModel(model_name=MODEL_NAME, system_instruction=SYSTEM_PROMPT)
+    if GEMINI_API_KEY is None:
+        raise ValueError('You must have `GEMINI_API_KEY` set in the environment (or .env file) to let Gemini query the DB.')
+
+    genai.configure(api_key=GEMINI_API_KEY)
+
+    model = genai.GenerativeModel(model_name=model_name, system_instruction=SYSTEM_PROMPT)
     chat = model.start_chat()
+
+    print(f'Connected to database, {model_name} is ready to respond to your queries. Enter (q)uit to exit the loop.')
 
     user_prompt = input('What would you like to see? ')
 
@@ -68,7 +78,7 @@ def run_terminal_loop(cursor):
 
         response = chat.send_message(content=prompt).text
 
-        print(MODEL_NAME,  'response:\n', response)
+        print(model_name,  'response:\n', response)
 
         scripts = re.findall('```python(.+?)```', response, re.DOTALL)
 
@@ -93,4 +103,4 @@ if __name__ == '__main__':
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
 
-    run_terminal_loop(cursor)
+    run_terminal_loop(cursor, model_name=MODEL_NAME)

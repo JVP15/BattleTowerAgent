@@ -31,7 +31,7 @@ class BattleTowerSearchSubAgent(BattleTowerAgent):
 
     strategy = 'move_select'
     def __init__(self, savestate_file: str, moves: int | list[int]):
-        super().__init__(render=True, savestate_file=savestate_file)
+        super().__init__(render=False, savestate_file=savestate_file)
 
         if isinstance(moves, int):
             moves = [moves]

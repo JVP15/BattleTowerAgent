@@ -27,7 +27,7 @@ from battle_tower_agent.agent import (
     at_save_battle_video,
 )
 
-from search_agent import InvalidMoveSelected
+from battle_tower_agent.search_agent import InvalidMoveSelected
 
 from battle_tower_agent.battle_tower_database.interface import BattleTowerDBInterface, BattleTowerServerDBInterface
 
@@ -39,7 +39,6 @@ else:
     SEARCH_TEAM_SAVESTATE = os.path.join(ROM_DIR, 'Pokemon - Platinum Battle Tower Search Team Linux.dst')
 
 logger = logging.getLogger('SearchTowerAgent')
-logging.basicConfig(level=logging.DEBUG)
 
 HP_PER_POKEMON = 100
 
@@ -389,6 +388,7 @@ class BattleTowerSearchV2Agent(BattleTowerAgent):
         savestate_file=SEARCH_TEAM_SAVESTATE,
         db_interface: BattleTowerDBInterface = None,
         depth=1,
+        search_swap=True,
         team=GARCHOMP_SUICUNE_SCIZOR_TEAM,
     ):
         """
@@ -401,16 +401,22 @@ class BattleTowerSearchV2Agent(BattleTowerAgent):
                 There is a somewhat intricate setup needed to run the agent, so I don't recommend changing this.
             db_interface: A BattleTowerDB Interface, letting the agent record it's stats to a DB as it is playing
                 (by default it is None, so it won't  record anything).
-            depth: how many combinations of moves that we'll try, although it's more like a class than an actual # of steps we'll go down the tree
+            depth: How many combinations of moves that we'll try, although it's more like a class than an actual # of steps we'll go down the tree
                 If depth is 1 or 2, it's all possible permutations of move 1 or 2 nodes down the tree.
                 Actually, only depths of 1 and 2 are supported.
+            search_swap: Whether to search over the possible swaps when a Pokemon faints. Slightly worse overall, but saves on compute.
             team: The team (in Pokemon Showdown format) used in the battle tower.
                 By default, goes with the team that is chosen with the default savestate.
         """
         super().__init__(render, savestate_file, db_interface)
 
         self.depth = depth
+        self.search_swap = search_swap
         self.strategy = f'search_v2_depth_{depth}'
+
+        if search_swap:
+            self.strategy += '_swap'
+
         self.team = team
 
         # SEARCH OPTIMIZATION: if we find a winning move combo, lets just use it!
@@ -452,14 +458,15 @@ class BattleTowerSearchV2Agent(BattleTowerAgent):
             p.start()
 
         # we basically re-create everything above (except for the stop event)
-        # seperately for searching over swapped pokemon b/c there are only certain conditions to search for swaps
-        num_swap_searches = len(self.possible_moves) * (NUM_POKEMON_IN_SINGLES - 1)
+        # seperately for searching over swapped pokemon b/c there are only certain conditions to search for swap
+        # (if we actually *do* search over possible swaps)
+        num_swap_searches = len(self.possible_moves) * (NUM_POKEMON_IN_SINGLES - 1) if self.search_swap else 0
         self.swap_damage_values = [Value('i', 0) for _ in range(num_swap_searches)]
         self.swap_savestate_file_queues = [Queue() for _ in range(num_swap_searches)]
         self.swap_stop_barrier = Barrier(num_swap_searches + 1)
 
         self.swap_processes = []
-        for i, move_list in enumerate(self.possible_moves * (NUM_POKEMON_IN_SINGLES - 1)):
+        for i, move_list in enumerate(range(num_swap_searches)):
             swapped_pkmn = i // POKEMON_MAX_MOVES + 1 # the "swap_to" pokemon starts from 1
             p = ctx.Process(
                 target=init_search_process, # args look like savestate_queue, move_list, swap_to, result_queue, stop_event, stop_barrier, and damage
@@ -482,7 +489,7 @@ class BattleTowerSearchV2Agent(BattleTowerAgent):
     def _select_move(self) -> int:
         if self.winning_move_idx > self.pred_turns_to_win:
             self._reset_winning_moves()
-            logger.debug(f"We're on turn {self.winning_move_idx} of the 'winning' move list yet we expected to win in {self.pred_turns_to_win}, search will resume.")
+            logger.info(f"We're on turn {self.winning_move_idx} of the 'winning' move list yet we expected to win in {self.pred_turns_to_win}, search will resume.")
 
         if self.winning_move_list is None:
             logger.debug(f'Searching over {self.possible_moves}')
@@ -539,12 +546,12 @@ class BattleTowerSearchV2Agent(BattleTowerAgent):
 
         # when we swap pokemon, we need to reset the "winning" move list b/c something CLEARLY went wrong and we didn't win
         if self.winning_move_list is not None:
-            logger.debug(f'Expected to win by following {self.winning_move_list}, but on turn {self.winning_move_idx} the current pokemon fainted. Restarting search.')
+            logger.info(f'Expected to win by following {self.winning_move_list}, but on turn {self.winning_move_idx} the current pokemon fainted. Restarting search.')
         self._reset_winning_moves()
 
         # TODO [OPTIONAL]: when swapping pokemon, whatever the next move they choose, go w/ it for the next round instead of searching
         do_search = self.healthy_pokemon >= 2 # no point to search unless there is a choice
-        if do_search:
+        if do_search and self.search_swap:
             # NOTE: this *will* set the winning move if we find it during the search so there's that
             best_result = self._do_search(
                 savestate_queue=self.swap_savestate_file_queues,
@@ -554,7 +561,8 @@ class BattleTowerSearchV2Agent(BattleTowerAgent):
 
             if best_result:
                 swap_slot = best_result.swap_to
-                log_str = f'After searching with a depth of {self.depth}, Pokemon {swap_slot} did {best_result.damage_dealt} damage in {best_result.turns} turns.'
+                log_str = (f'After searching with a depth of {self.depth}, Pokemon {swap_slot} did {best_result.damage_dealt}' 
+                           ' damage in {best_result.turns} turns. Swapping to {swap_slot}.')
                 if best_result.won:
                     log_str += f' Won the game. Following {best_result.moves} for the rest of the game.'
                 logger.info(log_str)
@@ -695,10 +703,14 @@ class BattleTowerSearchV2Agent(BattleTowerAgent):
         self.pred_turns_to_win = 0
 
 if __name__ == '__main__':
+    logging.basicConfig(level=logging.DEBUG)
+
     agent = BattleTowerSearchV2Agent(
         render=True,
         depth=1,
-        db_interface=BattleTowerServerDBInterface()
+        search_swap=False,
+        savestate_file='../ROM/Hopefully Faint.dst'
+        #db_interface=BattleTowerServerDBInterface()
     )
 
     agent.play()

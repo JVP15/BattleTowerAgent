@@ -7,7 +7,7 @@ import os
 import datetime
 
 from battle_tower_agent.battle_tower_database.interface import BattleTowerDBInterface, BattleTowerServerDBInterface
-from pokemon_env import PokemonEnv
+from battle_tower_agent.pokemon_env import PokemonEnv
 
 from enum import Enum
 
@@ -18,7 +18,6 @@ import logging
 logging.BUTTON_PRESS = 5
 logging.addLevelName(logging.BUTTON_PRESS, 'BUTTON_PRESS')
 
-logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger('TowerAgent')
 
 # roms should be in BattleTowerAgent/ROMS, and we should be in BattleTowerAgent/battle_tower_agent/agent.py
@@ -778,6 +777,8 @@ class BattleTowerAAgent(BattleTowerAgent):
 
 
 if __name__ == '__main__':
+    logging.basicConfig(level=logging.DEBUG)
+
     agent = BattleTowerAAgent(
         render=True,
         db_interface=BattleTowerServerDBInterface()
