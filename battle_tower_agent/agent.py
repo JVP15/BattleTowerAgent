@@ -36,7 +36,8 @@ os.makedirs(SEARCH_SAVESTATE_DIR, exist_ok=True)
 BUTTON_PRESS_DURATION = 5
 AFTER_PRESS_WAIT = 30 # I have no good justification for this, we just need to spend some amount of time waiting for the game to process our input
 
-REF_IMG_DIR = os.path.join(ROOT_DIR, 'images', 'references')
+DATA_DIR = os.path.join(ROOT_DIR, 'data')
+REF_IMG_DIR = os.path.join(DATA_DIR, 'reference_images')
 
 BATTLE_TOWER_STREAK_LENGTH = 7
 NUM_POKEMON_IN_SINGLES = 3 # in case I ever want to do doubles, I'm setting this now
@@ -731,7 +732,7 @@ class BattleTowerAgent:
                 self.cur_frame = self._act()
 
     def _log_error_image(self, message='', state=None):
-        log_dir = os.path.join('log', 'debug')
+        log_dir = os.path.join(ROOT_DIR, 'log', 'debug')
         os.makedirs(log_dir, exist_ok=True)
         now = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
 
@@ -851,7 +852,7 @@ if __name__ == '__main__':
     #     screen = screen.reshape((SCREEN_HEIGHT_BOTH, SCREEN_WIDTH, 4))[..., :3]  # drop the alpha channel
     #
     #     if keyboard.is_pressed('t'):
-    #         image_path = os.path.join('images', 'Decision Making', input('Enter image path:') + '.PNG')
+    #         image_path = os.path.join(DATA_DIR, 'Decision Making', input('Enter image path:') + '.PNG')
     #
     #         cv2.imwrite(image_path, screen)
     #

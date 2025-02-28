@@ -709,7 +709,6 @@ if __name__ == '__main__':
         render=True,
         depth=1,
         search_swap=False,
-        savestate_file='../ROM/Hopefully Faint.dst'
         #db_interface=BattleTowerServerDBInterface()
     )
 

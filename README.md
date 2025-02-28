@@ -1,6 +1,6 @@
 # Battle Tower Agent
 
-![image](images/battle_tower.png)
+![image](data/battle_tower.png)
 
 This is an AI Agent (using "AI" as in "video game AI" not "neural network" AI) that can play Pokémon Platinum's Singles Battle Tower .
 It controls Pokémon Platinum using [py-desmume](https://github.com/SkyTemple/py-desmume), and you'll have to supply your own ROM file (see Setup).

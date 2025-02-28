@@ -206,8 +206,8 @@ if __name__ == '__main__':
 
     emu = DeSmuME()
     emu.open(ROM_FILE)
-    emu.savestate.load_file('..\..\ROM\Pokemon - Platinum Battle Tower.dst')
-    emu.volume_set(0)
+    emu.savestate.load_file('../ROM/Pokemon - Platinum Battle Tower.dst')
+    emu.volume_set(50)
 
     # Create the window for the emulator
     window = emu.create_sdl_window()
@@ -229,7 +229,7 @@ if __name__ == '__main__':
         "right": Keys.KEY_RIGHT,
         "left": Keys.KEY_LEFT,
     }
-
+    import time
     while not window.has_quit():
         # Check if any buttons are pressed and process them
         for key, emulated_button in CONTROLS.items():
@@ -239,7 +239,7 @@ if __name__ == '__main__':
                 emu.input.keypad_rm_key(keymask(emulated_button))
 
         if keyboard.is_pressed('t'):
-            image_path = os.path.join('../../images', 'Decision Making', input('Enter image path:') + '.PNG')
+            image_path = os.path.join('../../data', 'Decision Making', input('Enter image path:') + '.PNG')
             screen_buffer = emu.display_buffer_as_rgbx()
             screen_pixels = np.frombuffer(screen_buffer, dtype=np.uint8)
             screen = screen_pixels[:SCREEN_PIXEL_SIZE_BOTH * 4]
