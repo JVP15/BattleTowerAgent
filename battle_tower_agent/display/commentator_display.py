@@ -46,6 +46,7 @@ import os
 from playsound import playsound
 
 from battle_tower_agent.agent import DATA_DIR
+from battle_tower_agent.display.gemini_commentator import GeminiCommentator
 from battle_tower_agent.twitch_agent import BattleTowerTwitchAgent
 
 from desmume.emulator import SCREEN_WIDTH, SCREEN_HEIGHT, SCREEN_HEIGHT_BOTH
@@ -70,7 +71,6 @@ BUBBLE_PADDING = 8     # padding inside each bubble
 BUBBLE_SPACING = 10    # vertical spacing between bubbles
 BUBBLE_RADIUS = 10
 
-# MAX BUBBLE WIDTH
 
 # Result bar settings:
 RESULT_FONT = cv2.FONT_HERSHEY_DUPLEX
@@ -317,7 +317,7 @@ def draw_chat_feed(chat_img, finished_groups, current_conv, current_stream):
 
 
 # ––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
-# Launch the Battle Tower Agent.
+# Launch the Battle Tower Agent
 def start_battle_tower_agent(frame_queue: queue.Queue, result_queue: queue.Queue):
     agent = BattleTowerTwitchAgent(
         frame_queue=frame_queue,
@@ -326,25 +326,35 @@ def start_battle_tower_agent(frame_queue: queue.Queue, result_queue: queue.Queue
     )
     agent.play()
 
+# ––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
+# Handle the Commentator Thread
+def run_commentator_loop(video_queue: queue.Queue, message_queue: queue.Queue):
+    """
+    Runs a loop waiting for videos (i.e. paths to a folder with images in them),
+    calls the GeminiCommentators with that path, and then puts the result in the message queue.
 
+    If the video path is ever None, quits.
+    """
+    commentators = GeminiCommentator()
 
-class CommentatorDisplay:
-    """This displays the Pokemon Battle Tower Agent and uses Gemini to commentate on the battle"""
+    while True:
+        video_path = video_queue.get(block=True)
 
-    def __init__(self):
-        pass
+        if video_path is None:
+            break
 
+        conversation = commentators(video_path)
+        if conversation is not None:
+            message_queue.put(conversation)
 
+def create_video_dir() -> str:
+    """Creates a new directory to store the frames and returns the full path"""
 
-    def run(self):
-        """This is the main loop that launches the display. Press q to stop it."""
+    video_file = f'pkmn_{datetime.datetime.now().strftime("%Y%m%d-%H%M%S")}'
+    video_path = os.path.join(DATA_DIR, 'video', video_file)
+    os.makedirs(video_path)
 
-        # this is the latest "conversation" that we are processing from Gemini
-        # each conversation is a list of messages that go back and forth between the two commentators
-        current_message_set = None
-        current_msg_index = 0  # this is which message in that conversation we're currently on
-        current_char_index = 0 # this is which character we've printed
-        current_message_finished = False # in the next cycle, we'll
+    return video_path
 
 
 # ––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
@@ -371,9 +381,10 @@ def main():
     # These receive the frames/current scores from the Battle Tower Agent
     frame_queue = queue.Queue(maxsize=5)
     result_queue = queue.Queue()
+    video_queue = queue.Queue()
 
-    sim_thread = threading.Thread(target=simulate_incoming_messages, args=(message_queue,), daemon=True)
-    sim_thread.start()
+    gemini_thread = threading.Thread(target=simulate_incoming_messages, args=(message_queue,), daemon=True)
+    gemini_thread.start()
 
     agent_thread = threading.Thread(
         target=start_battle_tower_agent,
@@ -388,15 +399,15 @@ def main():
     current_streak = 0
     longest_streak = 0
 
-
     # –––––––––––––––––––––––––––––––––––
     # Managing the video (to send to Gemini)
-    frame_counter = 0
-    video_frame_length = 90
 
-    video_file = f'pkmn_{datetime.datetime.now().strftime("%y%m%d-%M%S")}'
-    video_path = os.path.join(DATA_DIR, 'video', video_file)
-    os.makedirs(video_path)
+    # this is used to keep track of the videos and gets reset when we create a new video
+    frame_counter = 0
+
+    video_path = create_video_dir()
+    # this lets us clean up videos that we've already used
+    prev_video_path = None
 
     # –––––––––––––––––––––––––––––––––––
     # Main display loop
@@ -414,19 +425,11 @@ def main():
             frame = frame_queue.get(block=True, timeout=.5)
         except:
             pass
-        #
-        # frame_path = os.path.join(video_path, f'frame_{frame_counter:08}.png')
-        # cv2.imwrite(frame_path, cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
-        #
-        # if frame_counter % 90 == 0:
-        #     out, err = (
-        #         ffmpeg
-        #             .input(os.path.join(video_path, 'frame_%08d.png'), framerate=30)
-        #             .output(os.path.join(video_path, f'video_{frame_counter}.mp4'),cv='libx24')
-        #             .run()
-        #     )
-        #     if err:
-        #         print(err)
+
+        frame_path = os.path.join(video_path, f'frame_{frame_counter:06}.jpg')
+        cv2.imwrite(frame_path, frame)
+
+        # if frame_counter % 180 == 0:
 
         upper_screen = frame[:SCREEN_HEIGHT]
         lower_screen = frame[SCREEN_HEIGHT:]
@@ -446,7 +449,7 @@ def main():
         # ––– Draw the results bar at the very top.
         results_bar_color = (30, 30, 30)
         cv2.rectangle(canvas, (0, 0), (WINDOW_WIDTH, RESULTS_BAR_HEIGHT), results_bar_color, -1)
-        status_text = f"Today's Attempts: {num_attempts}  Current Streak: {current_streak}  Today's Longest Streak: {longest_streak}"
+        status_text = f"Today's Attempts: {num_attempts:<4} Current Streak: {current_streak:<4} Today's Longest Streak: {longest_streak}"
         text_size, baseline = cv2.getTextSize(status_text, RESULT_FONT, RESULT_FONT_SCALE, RESULT_THICKNESS)
         text_x = MARGIN
         text_y = (RESULTS_BAR_HEIGHT + text_size[1]) // 2
@@ -543,6 +546,10 @@ def main():
         key = cv2.waitKey(1) & 0xFF
         if key == ord("q"):
             break
+
+    agent_thread.join()
+    gemini_thread.join()
+    
 
     cv2.destroyAllWindows()
 

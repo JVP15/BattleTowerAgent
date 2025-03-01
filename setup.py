@@ -16,8 +16,10 @@ setup(
         'py-desmume',
         # required to run the DB server
         'flask',
-        # required for
-        'google-generativeai',
-        'google-ai-generativelanguage'
+        # required for gemini
+        'google-genai',
+        # required for the UI
+        'playsound==1.2.2',
+        'ffmpeg-python'
     ]
 )
