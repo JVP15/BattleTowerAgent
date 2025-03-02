@@ -34,7 +34,9 @@ This code was heavily written by OpenAI o3-mini (mainly because I don't enjoy do
 """
 
 import datetime
+import multiprocessing
 from collections import deque
+from functools import partial
 
 import cv2
 import numpy as np
@@ -72,9 +74,7 @@ BUBBLE_RADIUS = 10
 CHARS_PER_FRAME = 3  # Number of characters to display per frame (higher = faster text)
 AUDIO_BLIP_FREQUENCY = 7  # Play a blip every N characters (must be >= 1, keeps the audio from playing rapid-fire)
 
-
-
-# Result bar settings:
+# Result bar settings
 RESULT_FONT = cv2.FONT_HERSHEY_DUPLEX
 RESULT_FONT_SCALE = .8
 RESULT_THICKNESS = 1
@@ -88,11 +88,10 @@ CHAT_BUBBLE_BORDER_COLOR = (200, 200, 200)
 
 # Video Settings
 VIDEO_FPS = 30
-FIRST_VIDEO_LENGTH = VIDEO_FPS * 7 # idk, 7 seconds seems like a good time to wait
+FIRST_VIDEO_LENGTH = VIDEO_FPS * 7 # idk, 7 seconds seems like a good intro video to send to Gemini
 
 # Video/Commentary Synchronization Settings
 COMMENTARY_SYNC_DELAY_SECONDS = 10  # Seconds to delay frame display (gives Gemini time to respond to the initial video and go from there)
-FRAMES_PER_SECOND = 30  # Approximate frame rate for calculating delay buffer size
 
 # ––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
 # Audio Settings
@@ -274,8 +273,13 @@ def draw_chat_feed(chat_img, finished_groups, current_conv, current_stream):
 
 
 # ––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
-# Launch the Battle Tower Agent
+# Multitreading/Processing stuff
+
 def start_battle_tower_agent(frame_queue: queue.Queue, result_queue: queue.Queue, battle_tower_agent_is_ready: threading.Event):
+    """
+    Launched the Battle Tower Agent. When DeSmuME is initialized (which takes a second or two, will set
+    `battle_tower_agent_is_ready` (which is useful to synchronize the audio, DeSmuME has a variable init time).
+    """
     agent = create_battle_tower_display_agent(
         frame_queue=frame_queue,
         result_queue=result_queue,
@@ -284,8 +288,6 @@ def start_battle_tower_agent(frame_queue: queue.Queue, result_queue: queue.Queue
     battle_tower_agent_is_ready.set()
     agent.play()
 
-# ––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
-# Handle the Commentator Thread
 def run_commentator_loop(video_queue: queue.Queue, message_queue: queue.Queue):
     """
     Runs a loop waiting for videos (i.e. paths to a folder with images in them),
@@ -305,6 +307,23 @@ def run_commentator_loop(video_queue: queue.Queue, message_queue: queue.Queue):
         if conversation is not None:
             message_queue.put(conversation)
 
+def play_chat_audio_process(audio_queue: multiprocessing.Queue):
+    """
+    Okay this takes some explaining. Basically, I can delay the video, but not the audio with DeSmuME.
+    But when I use OBS to stream this stuff, I can specify application audio sources and apply a delay specificaly to it.
+    Unfortunately, I need to actually have a different "application" (read: process) for OBS, and it also needs its
+    own window. But this basically allows me to apply a 7 second delay to the Pokemon game in this code, and then a
+    7-second delay to the audio in OBS, leaving the video and audio for the chat feed untouched.
+
+    Also, OBS needs a window to latch onto, which is why I need to create a persistent window here.
+    I don't like that window, so when I'm not using this for twitch streaming, I just use playsound like normal.
+    """
+    cv2.namedWindow("BattleTowerAgentChatAudio")
+
+    while True:
+        audio_file = audio_queue.get()
+        playsound(audio_file, block=False)
+
 def create_video_dir() -> str:
     """Creates a new directory to store the frames and returns the full path"""
 
@@ -317,7 +336,17 @@ def create_video_dir() -> str:
 
 # ––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
 # Main loop.
-def main():
+def main(display_for_twitch_streaming=True):
+    """
+    Runs the commentator display.
+    If `display_for_twitch_streaming` is True, then we apply some little QoL things like delaying the video so that
+    Gemini can respond in more "real-time" (note: real-time streaming w/ Gemini doesn't fix this).
+    Since that causes the audio to go out of sync, there is additional support for OBS to capture the game and chat feed
+    audio separately.
+
+    If it's false, then we just play things as they are.
+    """
+
     # –––––––––––––––––––––––––––––––––––
     # Conversation state tracking
     finished_message_groups = []  # list of past conversations from Gemini (TODO: prune it as the list gets longer)
@@ -340,6 +369,7 @@ def main():
     frame_queue = queue.Queue(maxsize=5)
     result_queue = queue.Queue()
     video_queue = queue.Queue()
+
     # DeSmuME takes a while (and variable amount of time) to init, and this helps us stay synchronized
     #  (at least when we are using another program to process the audio and video separately)
     battle_tower_agent_is_set = threading.Event()
@@ -360,7 +390,20 @@ def main():
 
     battle_tower_agent_is_set.wait()
 
+    # okay this takes some explaining, but which you can find in the `play_chat_audio_process` fn
 
+    if display_for_twitch_streaming:
+        audio_queue = multiprocessing.Queue()
+        audio_process = multiprocessing.Process(
+            target=play_chat_audio_process,
+            args=(audio_queue, ),
+        )
+
+        audio_process.start()
+
+        play_chat_audio = audio_queue.put
+    else:
+        play_chat_audio = partial(playsound, block=False)
 
     # –––––––––––––––––––––––––––––––––––
     # Keeping track of run statistics
@@ -381,7 +424,7 @@ def main():
     # depending on the application, we may apply a delay before actually showing the video of the Agent
     # this is to let Gemini have some "catch up time" so that it's outputs don't reference stuff 10 seconds ago
     delay_buffer = deque()
-    delay_frames_needed = COMMENTARY_SYNC_DELAY_SECONDS * VIDEO_FPS
+    delay_frames_needed = COMMENTARY_SYNC_DELAY_SECONDS * VIDEO_FPS if display_for_twitch_streaming else 0
 
     # –––––––––––––––––––––––––––––––––––
     # Main display loop
@@ -533,7 +576,7 @@ def main():
                             else:
                                 audio_file = None
                             if audio_file:
-                                playsound(audio_file, block=False)
+                                play_chat_audio(audio_file) # this works w/ both the process and plain-ol playsound method
                                 break  # Only play one blip per frame
 
                     current_char_index += chars_to_add
@@ -571,9 +614,11 @@ def main():
     agent_thread.join()
     gemini_thread.join()
 
+    if display_for_twitch_streaming:
+        audio_process.join()
 
     cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
-    main()
+    main(display_for_twitch_streaming=True)
