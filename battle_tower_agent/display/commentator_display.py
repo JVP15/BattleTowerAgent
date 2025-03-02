@@ -35,6 +35,7 @@ This code was heavily written by OpenAI o3-mini (mainly because I don't enjoy do
 
 import datetime
 import multiprocessing
+import shutil
 from collections import deque
 from functools import partial
 
@@ -331,7 +332,7 @@ def create_video_dir() -> str:
     video_file = f'pkmn_{datetime.datetime.now().strftime("%Y%m%d-%H%M%S")}'
     video_path = os.path.join(DATA_DIR, 'video', video_file)
     os.makedirs(video_path)
-
+    print('creating', video_path)
     return video_path
 
 
@@ -557,7 +558,7 @@ def main(display_for_twitch_streaming=True):
                 video_queue.put(video_path)
 
                 if os.path.exists(prev_video_path): # it's polite to clean up the video dir
-                    os.removedirs(prev_video_path)
+                    shutil.rmtree(prev_video_path)
 
                 prev_video_path = video_path
                 video_path = create_video_dir()

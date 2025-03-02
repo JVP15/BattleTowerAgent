@@ -39,7 +39,7 @@ MODEL = 'gemini-2.0-flash'
 COMMENTATORS = ['Pollux', 'Castor']
 MAX_CONVERSATION_LEN = 5
 MIN_CONVERSATION_LEN = 2
-MAX_HISTORY_LEN = 8
+MAX_HISTORY_LEN = 3
 
 SYSTEM_PROMPT = """Simulate a sports commentary between two personalities, Castor and Pollux, in response to a video snippet from a Pokémon game, following the structure of a sports newscast discussion.
 
@@ -88,11 +88,12 @@ The commentary should be output as a JSON object with a list of messages, where 
 - Adjust tone and excitement level according to the video content while maintaining professionalism as commentators.
 """
 
-USER_PROMPT = """First Commentator: {commentator}
-Number of Messages: {num_messages}
+USER_PROMPT = """Here is a history of the previous conversations: {history}
 
-Here is a history of what has happened so far: {history}
-"""
+Try to be creative and discuss new topics.
+
+First Commentator: {commentator}
+Number of Messages: {num_messages}"""
 
 # Ideas to improve commentary:
 # 1. Include history (i.e. the summaries from the last N, 5?? videos)
@@ -105,7 +106,7 @@ class Message(BaseModel):
     content: str
 
 class Conversation(BaseModel):
-    summary: str
+    # summary: str
     messages: list[Message]
 
 
@@ -175,7 +176,7 @@ class GeminiCommentator:
 
         num_messages = random.randint(MIN_CONVERSATION_LEN, MAX_CONVERSATION_LEN)
         role = random.choice(COMMENTATORS)
-        history = '\n* '.join(self.history)
+        history = self._history_to_str()
 
         prompt = self.user_prompt.format(commentator=role, num_messages=num_messages, history=history)
 
@@ -202,14 +203,24 @@ class GeminiCommentator:
 
         conversation = json_output.get('messages')
 
-        # TODO: add history support (commenting this out to avoid
-        summary = json_output.get('summary')
-        if summary:
-            self.history.append(summary)
-            self.history = self.history[-MAX_HISTORY_LEN:]
+        self.history.append(conversation)
 
         return conversation
 
+    def _history_to_str(self):
+        """Turns the current history into a string (and also truncates it to the maximum limit)"""
+        self.history = self.history[-MAX_HISTORY_LEN:]
+
+        if len(self.history) == 0:
+            return 'No previous conversations'
+
+        result = ''
+
+        for conversation in self.history:
+            for message in conversation:
+                result += f'\nRole: {message["role"]}\n{message["content"]}\n'
+
+        return result
 
 if __name__ == '__main__':
     video_path = r'C:\Users\jorda\Documents\Python\CynthAI\GeminiPlaysPokemon\data\video\pkmn_20250228-205616'
