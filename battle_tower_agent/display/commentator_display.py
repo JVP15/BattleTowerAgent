@@ -46,7 +46,7 @@ from playsound import playsound
 
 from battle_tower_agent.agent import DATA_DIR
 from battle_tower_agent.display.gemini_commentator import GeminiCommentator
-from battle_tower_agent.twitch_agent import BattleTowerTwitchAgent
+from battle_tower_agent.display_agent import create_battle_tower_display_agent
 
 from desmume.emulator import SCREEN_WIDTH, SCREEN_HEIGHT, SCREEN_HEIGHT_BOTH
 
@@ -83,7 +83,7 @@ CHAT_BUBBLE_BORDER_COLOR = (200, 200, 200)
 
 # Video Settings
 VIDEO_FPS = 30
-FIRST_VIDEO_LENGTH = VIDEO_FPS * 5 # idk, 5 seconds seems like a good time to wait
+FIRST_VIDEO_LENGTH = VIDEO_FPS * 3 # idk, 5 seconds seems like a good time to wait
 
 # ––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
 # Audio Settings
@@ -319,10 +319,9 @@ def draw_chat_feed(chat_img, finished_groups, current_conv, current_stream):
 # ––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
 # Launch the Battle Tower Agent
 def start_battle_tower_agent(frame_queue: queue.Queue, result_queue: queue.Queue):
-    agent = BattleTowerTwitchAgent(
+    agent = create_battle_tower_display_agent(
         frame_queue=frame_queue,
         result_queue=result_queue,
-        render=False
     )
     agent.play()
 

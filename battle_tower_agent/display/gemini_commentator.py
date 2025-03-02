@@ -37,8 +37,8 @@ logger.addHandler(file_handler)
 
 MODEL = 'gemini-2.0-flash'
 COMMENTATORS = ['Pollux', 'Castor']
-MAX_CONVERSATION_LEN = 7
-MIN_CONVERSATION_LEN = 3
+MAX_CONVERSATION_LEN = 5
+MIN_CONVERSATION_LEN = 2
 
 SYSTEM_PROMPT = """Simulate a sports commentary between two personalities, Castor and Pollux, in response to a video snippet from a Pokémon game, following the structure of a sports newscast discussion.
 
