@@ -36,7 +36,6 @@ This code was heavily written by OpenAI o3-mini (mainly because I don't enjoy do
 import datetime
 
 import cv2
-import ffmpeg
 import numpy as np
 import threading
 import queue
@@ -58,8 +57,6 @@ from desmume.emulator import SCREEN_WIDTH, SCREEN_HEIGHT, SCREEN_HEIGHT_BOTH
 WINDOW_WIDTH = 1280
 WINDOW_HEIGHT = 720
 
-# Screen Settings
-
 # Chat bubble settings:
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 FONT_SCALE = .5
@@ -70,7 +67,6 @@ MARGIN = 10  # margin within chat region
 BUBBLE_PADDING = 8     # padding inside each bubble
 BUBBLE_SPACING = 10    # vertical spacing between bubbles
 BUBBLE_RADIUS = 10
-
 
 # Result bar settings:
 RESULT_FONT = cv2.FONT_HERSHEY_DUPLEX
@@ -84,6 +80,10 @@ CASTOR_BUBBLE_COLOR = (70, 70, 70)
 POLLUX_BUBBLE_COLOR = (90, 90, 90)
 CHAT_BACKGROUND_COLOR = (50, 50, 50)
 CHAT_BUBBLE_BORDER_COLOR = (200, 200, 200)
+
+# Video Settings
+VIDEO_FPS = 30
+FIRST_VIDEO_LENGTH = VIDEO_FPS * 5 # idk, 5 seconds seems like a good time to wait
 
 # ––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
 # Audio Settings
@@ -383,7 +383,11 @@ def main():
     result_queue = queue.Queue()
     video_queue = queue.Queue()
 
-    gemini_thread = threading.Thread(target=simulate_incoming_messages, args=(message_queue,), daemon=True)
+    gemini_thread = threading.Thread(
+        target=run_commentator_loop,
+        args=(video_queue, message_queue,),
+        daemon=True
+    )
     gemini_thread.start()
 
     agent_thread = threading.Thread(
@@ -402,12 +406,13 @@ def main():
     # –––––––––––––––––––––––––––––––––––
     # Managing the video (to send to Gemini)
 
-    # this is used to keep track of the videos and gets reset when we create a new video
+    # we'll reset this whenever we start on a new video
     frame_counter = 0
 
     video_path = create_video_dir()
-    # this lets us clean up videos that we've already used
-    prev_video_path = None
+    prev_video_path = None # this lets us clean up videos that we've already used
+
+    is_initial_video = True
 
     # –––––––––––––––––––––––––––––––––––
     # Main display loop
@@ -429,7 +434,13 @@ def main():
         frame_path = os.path.join(video_path, f'frame_{frame_counter:06}.jpg')
         cv2.imwrite(frame_path, frame)
 
-        # if frame_counter % 180 == 0:
+        # the first video needs special processing
+        if is_initial_video and frame_counter == FIRST_VIDEO_LENGTH:
+            is_initial_video = False
+            video_queue.put(video_path) # this starts the whole video processing + sending to Gemini thing
+            prev_video_path = video_path
+            video_path = create_video_dir()
+            frame_counter = 0
 
         upper_screen = frame[:SCREEN_HEIGHT]
         lower_screen = frame[SCREEN_HEIGHT:]
@@ -489,15 +500,29 @@ def main():
         cv2.line(canvas, (U_disp_w, RESULTS_BAR_HEIGHT), (U_disp_w, WINDOW_HEIGHT), (200, 200, 200), 2)
         cv2.line(canvas, (msg_region_left, lower_y), (WINDOW_WIDTH, lower_y), (200, 200, 200), 2)
 
-        # ––– Process incoming messages (after we've processed all of the current messages)
+        # ––– Process incoming messages (after we've processed all the current messages)
         if current_message_set is None:
+            # TODO: what happens if there are a lot of frames?
             try:
                 current_message_set = message_queue.get(block=False)
+
+                # reset everything related to the conversation
                 current_msg_index = 0
                 current_char_index = 0
                 current_message_finished = False
                 current_conv_messages = []  # start a new conversation group
                 print("Received new message set:", current_message_set)
+
+                # now we can also send the current video to Gemini
+                video_queue.put(video_path)
+
+                if os.path.exists(prev_video_path): # it's polite to clean up the video dir
+                    os.removedirs(prev_video_path)
+
+                prev_video_path = video_path
+                video_path = create_video_dir()
+                frame_counter = 0
+
             except:
                 pass
 

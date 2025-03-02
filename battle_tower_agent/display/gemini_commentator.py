@@ -21,13 +21,15 @@ logger.setLevel(logging.DEBUG)
 ROOT_DIR = pathlib.Path(__file__).parent.parent.parent.resolve()
 dotenv.load_dotenv(os.path.join(ROOT_DIR, '.env'))
 
+
 # we'll put the logs in BattleTowerAgent/logs/gemini/commentator.log
 LOG_DIR = os.path.join(ROOT_DIR, 'log', 'gemini')
 LOG_FILE = os.path.join(LOG_DIR, 'commentator.log')
 os.makedirs(LOG_DIR, exist_ok=True)
 
 file_handler = logging.FileHandler(LOG_FILE, encoding='utf-8')
-formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+# by default, asctime includes miliseconds, but I don't want them so... boo
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s', datefmt="%Y-%m-%d %H:%M:%S")
 file_handler.setFormatter(formatter)
 
 logger.addHandler(file_handler)
@@ -146,7 +148,7 @@ class GeminiCommentator:
             time.sleep(.5)
             video_remote = self.client.files.get(name=video_remote.name)
 
-        logger.info(f'Took {time.time() - start} seconds to process and upload {video_path}')
+        logger.info(f'Took {time.time() - start:.3f} seconds to process and upload {video_path}')
 
         return video_remote
 
@@ -184,7 +186,11 @@ class GeminiCommentator:
             config=self.generation_config,
         )
 
-        logger.info(f'Input tokens: {response.usage_metadata.prompt_token_count}. Output tokens: {response.usage_metadata.candidates_token_count}. Took {time.time() - start} seconds to call Gemini. ')
+        logger.info(
+            f' Took {time.time() - start:.3f} seconds to call {self.model_name}.'
+            f' Input tokens: {response.usage_metadata.prompt_token_count}.'
+            f' Output tokens: {response.usage_metadata.candidates_token_count}.'
+        )
 
         logger.debug(f'Prompt:\n{prompt}\nResponse:\n{response.text}')
         json_output = response.parsed.dict()
