@@ -91,7 +91,7 @@ VIDEO_FPS = 30
 FIRST_VIDEO_LENGTH = VIDEO_FPS * 7 # idk, 7 seconds seems like a good intro video to send to Gemini
 
 # Video/Commentary Synchronization Settings
-COMMENTARY_SYNC_DELAY_SECONDS = 10  # Seconds to delay frame display (gives Gemini time to respond to the initial video and go from there)
+COMMENTARY_SYNC_DELAY_SECONDS = 9  # Seconds to delay frame display (gives Gemini time to respond to the initial video and go from there)
 
 # ––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
 # Audio Settings
@@ -423,8 +423,11 @@ def main(display_for_twitch_streaming=True):
 
     # depending on the application, we may apply a delay before actually showing the video of the Agent
     # this is to let Gemini have some "catch up time" so that it's outputs don't reference stuff 10 seconds ago
-    delay_buffer = deque()
+    frame_buffer = deque()
     delay_frames_needed = COMMENTARY_SYNC_DELAY_SECONDS * VIDEO_FPS if display_for_twitch_streaming else 0
+
+    # we also need the results to be in-sync, so a simple solution is to just use a results buffer too
+    result_buffer = deque([None] * delay_frames_needed)
 
     # –––––––––––––––––––––––––––––––––––
     # Main display loop
@@ -448,10 +451,10 @@ def main(display_for_twitch_streaming=True):
             frame_counter += 1
 
             # we'll *actually* get the frames from the frame buffer (NOTE: this is dependant on the video FPS being relatively stable)
-            delay_buffer.append(new_frame)
+            frame_buffer.append(new_frame)
 
-            if len(delay_buffer) > delay_frames_needed:
-                frame = delay_buffer.popleft()
+            if len(frame_buffer) > delay_frames_needed:
+                frame = frame_buffer.popleft()
 
         except:
             pass
@@ -470,14 +473,20 @@ def main(display_for_twitch_streaming=True):
         upper_screen = frame[:SCREEN_HEIGHT]
         lower_screen = frame[SCREEN_HEIGHT:]
 
-        # Process any new stats from the results queue.
         try:
-            result_dict = result_queue.get(block=False)
+            new_result_dict = result_queue.get(block=False)
+
+            # instead of immediately updating the results, we use the result buffer (which automatically handles the delay)
+            result_buffer.append(new_result_dict)
+        except Exception:
+            result_buffer.append(None)
+
+        result_dict = result_buffer.popleft()
+
+        if result_dict:
             num_attempts = result_dict['num_attempts']
             current_streak = result_dict['current_streak']
             longest_streak = result_dict['longest_streak']
-        except Exception:
-            pass
 
         # Build overall canvas.
         canvas = np.zeros((WINDOW_HEIGHT, WINDOW_WIDTH, 3), dtype=np.uint8)
@@ -621,4 +630,4 @@ def main(display_for_twitch_streaming=True):
 
 
 if __name__ == "__main__":
-    main(display_for_twitch_streaming=True)
+    main(display_for_twitch_streaming=False)
