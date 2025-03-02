@@ -72,7 +72,7 @@ BUBBLE_SPACING = 10    # vertical spacing between bubbles
 BUBBLE_RADIUS = 10
 
 CHARS_PER_FRAME = 3  # Number of characters to display per frame (higher = faster text)
-AUDIO_BLIP_FREQUENCY = 7  # Play a blip every N characters (must be >= 1, keeps the audio from playing rapid-fire)
+AUDIO_BLIP_FREQUENCY = 8  # Play a blip every N characters (must be >= 1, keeps the audio from playing rapid-fire)
 
 # Result bar settings
 RESULT_FONT = cv2.FONT_HERSHEY_DUPLEX
@@ -89,6 +89,7 @@ CHAT_BUBBLE_BORDER_COLOR = (200, 200, 200)
 # Video Settings
 VIDEO_FPS = 30
 FIRST_VIDEO_LENGTH = VIDEO_FPS * 7 # idk, 7 seconds seems like a good intro video to send to Gemini
+MAX_VIDEO_LENGTH = 20 * VIDEO_FPS # this limits the length of the video we'll send to Gemini, which makes sure it only covers the most recent, relevant parts.
 
 # Video/Commentary Synchronization Settings
 COMMENTARY_SYNC_DELAY_SECONDS = 9  # Seconds to delay frame display (gives Gemini time to respond to the initial video and go from there)
@@ -393,15 +394,18 @@ def main(display_for_twitch_streaming=True):
     # okay this takes some explaining, but which you can find in the `play_chat_audio_process` fn
 
     if display_for_twitch_streaming:
-        audio_queue = multiprocessing.Queue()
-        audio_process = multiprocessing.Process(
-            target=play_chat_audio_process,
-            args=(audio_queue, ),
-        )
-
-        audio_process.start()
-
-        play_chat_audio = audio_queue.put
+        # audio_queue = multiprocessing.Queue()
+        # audio_process = multiprocessing.Process(
+        #     target=play_chat_audio_process,
+        #     args=(audio_queue, ),
+        # )
+        #
+        # audio_process.start()
+        #
+        # play_chat_audio = audio_queue.put
+        # TODO: the text blip sound really messes w/ Twitch streaming, causing the audio and video to buffer a lot
+        # Instead of playing an audio blip on chat, I'll play a message notification sound, but that is for future me.
+        play_chat_audio = lambda audio: None
     else:
         play_chat_audio = partial(playsound, block=False)
 
@@ -439,8 +443,6 @@ def main(display_for_twitch_streaming=True):
     while True:
         start_time = time.perf_counter()
 
-        frame_counter += 1
-
         # Get a frame from the emulator.
         try:
             new_frame = frame_queue.get(block=True, timeout=.5)
@@ -450,7 +452,14 @@ def main(display_for_twitch_streaming=True):
             cv2.imwrite(frame_path, new_frame)
             frame_counter += 1
 
-            # we'll *actually* get the frames from the frame buffer (NOTE: this is dependant on the video FPS being relatively stable)
+            # I don't want the videos being sent to Gemini to be too long (with the current set up, it *shouldn't* happen, but this will enforce that)
+            if frame_counter > MAX_VIDEO_LENGTH:
+                old_frame_path = os.path.join(video_path, f'frame_{frame_counter - MAX_VIDEO_LENGTH:06}.jpg')
+                if os.path.exists(old_frame_path):
+                    os.remove(old_frame_path)
+
+            # to accomondate for the video delay, we actually get the frame from the frame buffer
+            # NOTE: this is dependant on the video FPS being relatively stable
             frame_buffer.append(new_frame)
 
             if len(frame_buffer) > delay_frames_needed:
@@ -458,9 +467,6 @@ def main(display_for_twitch_streaming=True):
 
         except:
             pass
-
-        frame_path = os.path.join(video_path, f'frame_{frame_counter:06}.jpg')
-        cv2.imwrite(frame_path, frame)
 
         # the first video needs special processing
         if is_initial_video and frame_counter == FIRST_VIDEO_LENGTH:
@@ -624,10 +630,11 @@ def main(display_for_twitch_streaming=True):
     gemini_thread.join()
 
     if display_for_twitch_streaming:
-        audio_process.join()
+        #audio_process.join() # see audio TODO above
+        pass
 
     cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
-    main(display_for_twitch_streaming=False)
+    main(display_for_twitch_streaming=True)
