@@ -39,6 +39,7 @@ MODEL = 'gemini-2.0-flash'
 COMMENTATORS = ['Pollux', 'Castor']
 MAX_CONVERSATION_LEN = 5
 MIN_CONVERSATION_LEN = 2
+MAX_HISTORY_LEN = 8
 
 SYSTEM_PROMPT = """Simulate a sports commentary between two personalities, Castor and Pollux, in response to a video snippet from a Pokémon game, following the structure of a sports newscast discussion.
 
@@ -88,7 +89,10 @@ The commentary should be output as a JSON object with a list of messages, where 
 """
 
 USER_PROMPT = """First Commentator: {commentator}
-Number of Messages: {num_messages}"""
+Number of Messages: {num_messages}
+
+Here is a history of what has happened so far: {history}
+"""
 
 # Ideas to improve commentary:
 # 1. Include history (i.e. the summaries from the last N, 5?? videos)
@@ -171,8 +175,9 @@ class GeminiCommentator:
 
         num_messages = random.randint(MIN_CONVERSATION_LEN, MAX_CONVERSATION_LEN)
         role = random.choice(COMMENTATORS)
+        history = '\n* '.join(self.history)
 
-        prompt = self.user_prompt.format(commentator=role, num_messages=num_messages)
+        prompt = self.user_prompt.format(commentator=role, num_messages=num_messages, history=history)
 
         contents = [
             video_file,
@@ -198,9 +203,10 @@ class GeminiCommentator:
         conversation = json_output.get('messages')
 
         # TODO: add history support (commenting this out to avoid
-        # summary = json_output.get('summary')
-        # if summary:
-        #     self.history.append(summary)
+        summary = json_output.get('summary')
+        if summary:
+            self.history.append(summary)
+            self.history = self.history[-MAX_HISTORY_LEN:]
 
         return conversation
 

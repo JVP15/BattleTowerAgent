@@ -30,10 +30,11 @@ The tricky part was the chat feed because it has a lot of nice features like:
 - Messages are surrounded by a bubble (like a rounded rectangle, which needed custom code).
 and more!
 
-This code was heavily written by OpenAI o3-mini (mainly because I don't enjoy doing UI stuff). 
+This code was heavily written by OpenAI o3-mini (mainly because I don't enjoy doing UI stuff).
 """
 
 import datetime
+from collections import deque
 
 import cv2
 import numpy as np
@@ -68,12 +69,16 @@ BUBBLE_PADDING = 8     # padding inside each bubble
 BUBBLE_SPACING = 10    # vertical spacing between bubbles
 BUBBLE_RADIUS = 10
 
+CHARS_PER_FRAME = 3  # Number of characters to display per frame (higher = faster text)
+AUDIO_BLIP_FREQUENCY = 7  # Play a blip every N characters (must be >= 1, keeps the audio from playing rapid-fire)
+
+
+
 # Result bar settings:
 RESULT_FONT = cv2.FONT_HERSHEY_DUPLEX
 RESULT_FONT_SCALE = .8
 RESULT_THICKNESS = 1
 RESULTS_BAR_HEIGHT = 40  # height for the status/results bar at the top
-
 
 # Color Settings
 CASTOR_BUBBLE_COLOR = (70, 70, 70)
@@ -83,64 +88,16 @@ CHAT_BUBBLE_BORDER_COLOR = (200, 200, 200)
 
 # Video Settings
 VIDEO_FPS = 30
-FIRST_VIDEO_LENGTH = VIDEO_FPS * 3 # idk, 5 seconds seems like a good time to wait
+FIRST_VIDEO_LENGTH = VIDEO_FPS * 7 # idk, 7 seconds seems like a good time to wait
+
+# Video/Commentary Synchronization Settings
+COMMENTARY_SYNC_DELAY_SECONDS = 10  # Seconds to delay frame display (gives Gemini time to respond to the initial video and go from there)
+FRAMES_PER_SECOND = 30  # Approximate frame rate for calculating delay buffer size
 
 # ––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
 # Audio Settings
 CASTOR_AUDIO = os.path.join(DATA_DIR, 'audio', 'castor.wav')
 POLLUX_AUDIO = os.path.join(DATA_DIR, 'audio', 'pollux.wav')
-
-# ––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
-# Simulate asynchronous arrival of message sets.
-def simulate_incoming_messages(msg_queue):
-    sample_message_sets = [
-        [  # Set 1
-            {"role": "Castor", "content": "Hello, Pollux! How are you doing today?"},
-            {"role": "Pollux", "content": "I'm fine, thanks Castor. How about yourself?"},
-        ],
-        [  # Set 2
-            {"role": "Castor",
-             "content": "I'm doing well. I've been pondering the complexities of our universe and the little details that make it so fascinating."},
-            {"role": "Pollux",
-             "content": "The universe is indeed an enigma—a tapestry of mysteries that leads us to question everything."},
-            {"role": "Castor",
-             "content": "Sometimes a few words can inspire a million thoughts, and every exchange sparks a new idea."},
-        ],
-        [  # Set 3: Longer texts.
-            {"role": "Pollux", "content": ("I recently read an article about quantum computing. "
-                                           "The possibilities are infinite, and I wonder how soon we might see a "
-                                           "radical shift in technology due to these emerging concepts. It is truly exciting!")},
-            {"role": "Castor", "content": ("Quantum computing holds great promise, but it also challenges our "
-                                           "current understanding of digital logic and data processing. "
-                                           "It's not only about speed—it’s a new paradigm that forces us to rethink everything.")},
-        ],
-        [  # Set 4
-            {"role": "Castor",
-             "content": ("By the way, did you see the latest project update? It includes bug fixes, performance "
-                         "improvements and several new features that I think you'll find very exciting. "
-                         "The interface has been refined, and we've made behind-the-scenes optimizations as well.")},
-            {"role": "Pollux", "content": (
-                "Yes, I caught a glimpse of it. The improvements in real-time processing are particularly impressive, "
-                "and I'm looking forward to testing the new functionality when I get a chance.")},
-        ],
-        [  # Set 5
-            {"role": "Pollux",
-             "content": ("Have you ever considered how artificial intelligence might transform our daily lives? "
-                         "From automating mundane tasks to enabling groundbreaking scientific discoveries, "
-                         "it's a field full of surprises and potential.")},
-            {"role": "Castor",
-             "content": ("Absolutely. AI isn’t just about efficiency—it’s about challenging our assumptions "
-                         "and redefining creativity. Its influence stretches far beyond simple automation.")},
-            {"role": "Pollux",
-             "content": ("Sometimes, in our pursuit of progress, we might overlook the beauty of spontaneity, "
-                         "the unexpected moments that ultimately shape our experiences.")},
-        ]
-    ]
-
-    for msg_set in sample_message_sets:
-        time.sleep(random.uniform(3, 6))
-        msg_queue.put(msg_set)
-
 
 # ––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
 # Wrap text into multiple lines based on a maximum pixel width.
@@ -318,11 +275,13 @@ def draw_chat_feed(chat_img, finished_groups, current_conv, current_stream):
 
 # ––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
 # Launch the Battle Tower Agent
-def start_battle_tower_agent(frame_queue: queue.Queue, result_queue: queue.Queue):
+def start_battle_tower_agent(frame_queue: queue.Queue, result_queue: queue.Queue, battle_tower_agent_is_ready: threading.Event):
     agent = create_battle_tower_display_agent(
         frame_queue=frame_queue,
         result_queue=result_queue,
     )
+
+    battle_tower_agent_is_ready.set()
     agent.play()
 
 # ––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
@@ -372,15 +331,18 @@ def main():
     message_delay_counter = 0
 
     # –––––––––––––––––––––––––––––––––––
-    # Starting/Communicating with the threads
+    # Starting/Communicating with the threads/processes
 
-    # A thread-safe queue for incoming conversations from Gemini
+    # This handle incoming conversations from Gemini
     message_queue = queue.Queue()
 
     # These receive the frames/current scores from the Battle Tower Agent
     frame_queue = queue.Queue(maxsize=5)
     result_queue = queue.Queue()
     video_queue = queue.Queue()
+    # DeSmuME takes a while (and variable amount of time) to init, and this helps us stay synchronized
+    #  (at least when we are using another program to process the audio and video separately)
+    battle_tower_agent_is_set = threading.Event()
 
     gemini_thread = threading.Thread(
         target=run_commentator_loop,
@@ -391,10 +353,14 @@ def main():
 
     agent_thread = threading.Thread(
         target=start_battle_tower_agent,
-        args=(frame_queue, result_queue),
+        args=(frame_queue, result_queue, battle_tower_agent_is_set),
         daemon=True
     )
     agent_thread.start()
+
+    battle_tower_agent_is_set.wait()
+
+
 
     # –––––––––––––––––––––––––––––––––––
     # Keeping track of run statistics
@@ -405,13 +371,17 @@ def main():
     # –––––––––––––––––––––––––––––––––––
     # Managing the video (to send to Gemini)
 
-    # we'll reset this whenever we start on a new video
-    frame_counter = 0
+    frame_counter = 0 # we reset this whenever we start on a new video
 
     video_path = create_video_dir()
     prev_video_path = None # this lets us clean up videos that we've already used
 
     is_initial_video = True
+
+    # depending on the application, we may apply a delay before actually showing the video of the Agent
+    # this is to let Gemini have some "catch up time" so that it's outputs don't reference stuff 10 seconds ago
+    delay_buffer = deque()
+    delay_frames_needed = COMMENTARY_SYNC_DELAY_SECONDS * VIDEO_FPS
 
     # –––––––––––––––––––––––––––––––––––
     # Main display loop
@@ -421,12 +391,25 @@ def main():
     frame = np.zeros((SCREEN_HEIGHT_BOTH, SCREEN_WIDTH, 3), dtype=np.uint8)
 
     while True:
+        start_time = time.perf_counter()
+
         frame_counter += 1
 
         # Get a frame from the emulator.
         try:
-            # the timeout ensures that, even if something freezes up, the UI processing stuff (half a second is probably too much but w/e)
-            frame = frame_queue.get(block=True, timeout=.5)
+            new_frame = frame_queue.get(block=True, timeout=.5)
+
+            # Always save the frame for the video (b/c we need these frames for Gemini)
+            frame_path = os.path.join(video_path, f'frame_{frame_counter:06}.jpg')
+            cv2.imwrite(frame_path, new_frame)
+            frame_counter += 1
+
+            # we'll *actually* get the frames from the frame buffer (NOTE: this is dependant on the video FPS being relatively stable)
+            delay_buffer.append(new_frame)
+
+            if len(delay_buffer) > delay_frames_needed:
+                frame = delay_buffer.popleft()
+
         except:
             pass
 
@@ -532,17 +515,28 @@ def main():
 
             if not current_message_finished:
                 if current_char_index < len(current_msg["content"]):
-                    # Play an audio blip on every other alphanumeric character (kinda like Phoenix Right).
-                    if current_char_index % 2 and current_msg["content"][current_char_index].isalnum():
-                        if current_msg["role"] == "Castor":
-                            audio_file = CASTOR_AUDIO
-                        elif current_msg["role"] == "Pollux":
-                            audio_file = POLLUX_AUDIO
-                        else:
-                            audio_file = None
-                        if audio_file:
-                            playsound(audio_file, block=False)
-                    current_char_index += 1
+                    # Figure out how many chars to add this frame
+                    chars_to_add = min(CHARS_PER_FRAME, len(current_msg["content"]) - current_char_index)
+
+                    # Check if we should play an audio blip (based on character positions)
+                    for i in range(chars_to_add):
+                        char_pos = current_char_index + i
+                        if (
+                                char_pos % AUDIO_BLIP_FREQUENCY == 0
+                                and char_pos < len(current_msg["content"])
+                                and current_msg["content"][char_pos].isalnum()
+                        ):
+                            if current_msg["role"] == "Castor":
+                                audio_file = CASTOR_AUDIO
+                            elif current_msg["role"] == "Pollux":
+                                audio_file = POLLUX_AUDIO
+                            else:
+                                audio_file = None
+                            if audio_file:
+                                playsound(audio_file, block=False)
+                                break  # Only play one blip per frame
+
+                    current_char_index += chars_to_add
                 if current_char_index >= len(current_msg["content"]):
                     current_message_finished = True
                     message_delay_counter = 15  # pause before next message
@@ -567,13 +561,16 @@ def main():
         draw_chat_feed(chat_region, finished_message_groups, current_conv_messages, current_stream)
 
         cv2.imshow("BattleTowerAgent", canvas)
-        key = cv2.waitKey(1) & 0xFF
+        elapsed_s = time.perf_counter() - start_time
+        remaining_ms = max(1, int( (1 / VIDEO_FPS - elapsed_s) * 1000))
+        # this keeps the FPS relatively stable, which is vital because text streaming is tied to FPS
+        key = cv2.waitKey(remaining_ms) & 0xFF
         if key == ord("q"):
             break
 
     agent_thread.join()
     gemini_thread.join()
-    
+
 
     cv2.destroyAllWindows()
 

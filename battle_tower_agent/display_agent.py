@@ -11,7 +11,7 @@ logger = logging.getLogger('DisplayAgent')
 TARGET_FPS = 60
 TARGET_FRAME_TIME = 1 / TARGET_FPS  # ~0.01667 seconds
 
-def create_battle_tower_display_agent(frame_queue: Queue, result_queue: Queue, agent_cls = BattleTowerAAgent, *agent_args, **agent_kwargs, ):
+def create_battle_tower_display_agent(frame_queue: Queue, result_queue: Queue, agent_cls = BattleTowerAAgent, volume: int = 100, *agent_args, **agent_kwargs, ):
     """
     Creates a Display Agent (i.e. an agent that works with the current commentator display) that subclasses a given BattleTower agent class.
 
@@ -19,6 +19,7 @@ def create_battle_tower_display_agent(frame_queue: Queue, result_queue: Queue, a
         frame_queue: Queue for sending frames to the UI.
         result_queue: Queue for sending results to the UI.
         agent_cls: The base BattleTowerAgent class to subclass (default: BattleTowerAAgent).
+        volume: The volume for the environment.
         *agent_args: Positional arguments to pass to the base class constructor.
         **agent_kwargs: Keyword arguments to pass to the base class constructor.
     """
@@ -42,7 +43,7 @@ def create_battle_tower_display_agent(frame_queue: Queue, result_queue: Queue, a
             self.result_queue = result_queue
 
             # we actually want the game to play audio now for the twitch stream
-            self.env.emu.volume_set(100)
+            self.env.emu.volume_set(volume)
 
         def _act(self, action: str | None = None) -> np.ndarray:
             """
