@@ -23,14 +23,14 @@ The general layout looks like:
 ##############################################
 
 The tricky part was the chat feed because it has a lot of nice features like:
-- text streaming (where each message will be printed 1 character per frame)
+- text streaming (where each message will be printed N characters per frame)
 - Left/right justification (based on the commentator)
 - Text warping (so that you can see the full message)
 - Conversation history (older messages will rise higher on the chat feed)
 - Messages are surrounded by a bubble (like a rounded rectangle, which needed custom code).
 and more!
 
-This code was heavily written by OpenAI o3-mini (mainly because I don't enjoy doing UI stuff).
+This code was written with heavy AI assistance (mainly because I don't enjoy doing UI stuff).
 """
 
 import datetime
@@ -61,7 +61,7 @@ from desmume.emulator import SCREEN_WIDTH, SCREEN_HEIGHT, SCREEN_HEIGHT_BOTH
 WINDOW_WIDTH = 1280
 WINDOW_HEIGHT = 720
 
-# Chat bubble settings:
+# Chat Feed settings:
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 FONT_SCALE = .5
 THICKNESS = 1
@@ -74,6 +74,9 @@ BUBBLE_RADIUS = 10
 
 CHARS_PER_FRAME = 3  # Number of characters to display per frame (higher = faster text)
 AUDIO_BLIP_FREQUENCY = 8  # Play a blip every N characters (must be >= 1, keeps the audio from playing rapid-fire)
+
+# To save on memory/compute, we'll only even save the previous N conversations for the chat feed (5 is probably too many already, but it's reasonable compute-wise)
+MAX_FINISHED_CONVERSATIONS = 5
 
 # Result bar settings
 RESULT_FONT = cv2.FONT_HERSHEY_DUPLEX
@@ -97,8 +100,11 @@ COMMENTARY_SYNC_DELAY_SECONDS = 9  # Seconds to delay frame display (gives Gemin
 
 # ––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
 # Audio Settings
-CASTOR_AUDIO = os.path.join(DATA_DIR, 'audio', 'castor.wav')
-POLLUX_AUDIO = os.path.join(DATA_DIR, 'audio', 'pollux.wav')
+CASTOR_BLIP_AUDIO = os.path.join(DATA_DIR, 'audio', 'castor_blip.wav')
+POLLUX_BLIP_AUDIO = os.path.join(DATA_DIR, 'audio', 'pollux.wav')
+
+CASTOR_MSG_AUDIO = os.path.join(DATA_DIR, 'audio', 'castor_msg.wav')
+POLLUX_MSG_AUDIO = os.path.join(DATA_DIR, 'audio', 'pollux_msg.wav')
 
 # ––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
 # Wrap text into multiple lines based on a maximum pixel width.
@@ -277,14 +283,18 @@ def draw_chat_feed(chat_img, finished_groups, current_conv, current_stream):
 # ––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
 # Multitreading/Processing stuff
 
-def start_battle_tower_agent(frame_queue: queue.Queue, result_queue: queue.Queue, battle_tower_agent_is_ready: threading.Event):
+def start_battle_tower_agent(frame_queue: queue.Queue, result_queue: queue.Queue, battle_tower_agent_is_ready: threading.Event, agent_kwargs: dict):
     """
     Launched the Battle Tower Agent. When DeSmuME is initialized (which takes a second or two, will set
     `battle_tower_agent_is_ready` (which is useful to synchronize the audio, DeSmuME has a variable init time).
     """
+    if agent_kwargs is None:
+        agent_kwargs = {}
+
     agent = create_battle_tower_display_agent(
         frame_queue=frame_queue,
         result_queue=result_queue,
+        **agent_kwargs
     )
 
     battle_tower_agent_is_ready.set()
@@ -332,13 +342,13 @@ def create_video_dir() -> str:
     video_file = f'pkmn_{datetime.datetime.now().strftime("%Y%m%d-%H%M%S")}'
     video_path = os.path.join(DATA_DIR, 'video', video_file)
     os.makedirs(video_path)
-    print('creating', video_path)
+
     return video_path
 
 
 # ––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
 # Main loop.
-def main(display_for_twitch_streaming=True):
+def main(display_for_twitch_streaming=True, agent_kwargs: dict = None):
     """
     Runs the commentator display.
     If `display_for_twitch_streaming` is True, then we apply some little QoL things like delaying the video so that
@@ -385,7 +395,7 @@ def main(display_for_twitch_streaming=True):
 
     agent_thread = threading.Thread(
         target=start_battle_tower_agent,
-        args=(frame_queue, result_queue, battle_tower_agent_is_set),
+        args=(frame_queue, result_queue, battle_tower_agent_is_set, agent_kwargs),
         daemon=True
     )
     agent_thread.start()
@@ -395,18 +405,18 @@ def main(display_for_twitch_streaming=True):
     # okay this takes some explaining, but which you can find in the `play_chat_audio_process` fn
 
     if display_for_twitch_streaming:
-        # audio_queue = multiprocessing.Queue()
-        # audio_process = multiprocessing.Process(
-        #     target=play_chat_audio_process,
-        #     args=(audio_queue, ),
-        # )
-        #
-        # audio_process.start()
-        #
-        # play_chat_audio = audio_queue.put
+        audio_queue = multiprocessing.Queue()
+        audio_process = multiprocessing.Process(
+            target=play_chat_audio_process,
+            args=(audio_queue, ),
+        )
+
+        audio_process.start()
+
+        play_chat_audio = audio_queue.put
         # TODO: the text blip sound really messes w/ Twitch streaming, causing the audio and video to buffer a lot
         # Instead of playing an audio blip on chat, I'll play a message notification sound, but that is for future me.
-        play_chat_audio = lambda audio: None
+        #play_chat_audio = lambda audio: None
     else:
         play_chat_audio = partial(playsound, block=False)
 
@@ -580,20 +590,35 @@ def main(display_for_twitch_streaming=True):
                     # Check if we should play an audio blip (based on character positions)
                     for i in range(chars_to_add):
                         char_pos = current_char_index + i
-                        if (
-                                char_pos % AUDIO_BLIP_FREQUENCY == 0
+
+                        # when streaming w/ OBS, having a bunch of really tiny blips screws with the audio
+                        #  so instead I just play a sound whenever there is a message.
+                        if display_for_twitch_streaming and char_pos == 0:
+                            if current_msg["role"] == "Castor":
+                                audio_file = CASTOR_MSG_AUDIO
+                            elif current_msg["role"] == "Pollux":
+                                audio_file = POLLUX_MSG_AUDIO
+                            else:
+                                audio_file = None
+
+                        elif (
+                                not display_for_twitch_streaming
+                                and char_pos % AUDIO_BLIP_FREQUENCY == 0
                                 and char_pos < len(current_msg["content"])
                                 and current_msg["content"][char_pos].isalnum()
                         ):
                             if current_msg["role"] == "Castor":
-                                audio_file = CASTOR_AUDIO
+                                audio_file = CASTOR_BLIP_AUDIO
                             elif current_msg["role"] == "Pollux":
-                                audio_file = POLLUX_AUDIO
+                                audio_file = POLLUX_BLIP_AUDIO
                             else:
                                 audio_file = None
-                            if audio_file:
-                                play_chat_audio(audio_file) # this works w/ both the process and plain-ol playsound method
-                                break  # Only play one blip per frame
+                        else:
+                            audio_file = None
+
+                        if audio_file:
+                            play_chat_audio(audio_file) # this works w/ both the process and plain-ol playsound method
+                            break  # Only play one blip per frame
 
                     current_char_index += chars_to_add
                 if current_char_index >= len(current_msg["content"]):
@@ -610,6 +635,7 @@ def main(display_for_twitch_streaming=True):
                     current_message_finished = False
                     if current_msg_index >= len(current_message_set):
                         finished_message_groups.append(current_conv_messages)
+                        finished_message_groups = finished_message_groups[-MAX_FINISHED_CONVERSATIONS:]
                         current_conv_messages = []
                         current_message_set = None
 
@@ -631,11 +657,17 @@ def main(display_for_twitch_streaming=True):
     gemini_thread.join()
 
     if display_for_twitch_streaming:
-        #audio_process.join() # see audio TODO above
+        audio_process.join()
         pass
 
     cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
-    main(display_for_twitch_streaming=True)
+    from battle_tower_agent.agent import ROM_DIR
+    display_savestate = os.path.join(ROM_DIR, 'Pokemon - Platinum Battle Tower Animation.dst')
+    agent_kwargs = {
+        'savestate_file': display_savestate,
+        #'volume': 0
+    }
+    main(display_for_twitch_streaming=True, agent_kwargs=agent_kwargs)
