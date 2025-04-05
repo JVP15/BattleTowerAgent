@@ -36,6 +36,10 @@ os.makedirs(SEARCH_SAVESTATE_DIR, exist_ok=True)
 BUTTON_PRESS_DURATION = 5
 AFTER_PRESS_WAIT = 30 # I have no good justification for this, we just need to spend some amount of time waiting for the game to process our input
 
+# a full battle may take about 10k frames, and if it takes that much time while *waiting* for something,
+# then something probably went wrong
+MAX_WAIT_CYCLES = 10_000
+
 DATA_DIR = os.path.join(ROOT_DIR, 'data')
 REF_IMG_DIR = os.path.join(DATA_DIR, 'reference_images')
 
@@ -100,14 +104,6 @@ def check_key_pixels(frame: np.ndarray, key_pixels, frame_is_bgr=True):
     return True
 
 def check_screen_subset(frame: np.ndarray, reference_image: np.ndarray, row: int, col: int) -> bool:
-    """
-    This is the other
-    :param frame:
-    :param reference_image:
-    :param row:
-    :param col:
-    :return:
-    """
     refence_height = reference_image.shape[0]
     reference_width = reference_image.shape[1]
 
@@ -490,7 +486,7 @@ class BattleTowerAgent:
 
         start_time = time.time()
         self.cur_battle_start_cycle = self.num_cycles
-        logger.debug(f'Beginning battle #{self.current_streak}')
+        logger.debug(f'Beginning battle #{self.current_streak + 1}') # +1 b/c we report streak length as 1-indexed
 
         self.state = self._wait_for(
             (in_battle, TowerState.BATTLE),
@@ -578,9 +574,9 @@ class BattleTowerAgent:
             but by the time A is finished processing, we've moved onto the 2nd state.
             This can be avoided by using `check_first` and implementing some of the logic yourself
         """
-        # TODO: add timeout feature so that we can check if something got stuck
 
         reached_state = None
+        starting_cycle = self.num_cycles
 
         def run_checks(frame):
             for check, state in checks:
@@ -608,6 +604,16 @@ class BattleTowerAgent:
 
                 if not reached_state:
                     reached_state = run_checks(self.cur_frame)
+
+            if self.num_cycles - starting_cycle > MAX_WAIT_CYCLES:
+                error_str = f'Timeout in `_wait_for`. It has been {self.num_cycles - starting_cycle} cycles with no change in state. Checking these conditions:'
+
+                for check, state in checks:
+                    check_name = check.__name__ if hasattr(check, '__name__') else 'lambda'
+                    error_str += f'\n- {check_name}: {state}'
+
+                self._log_error_image(message='wait_for_timeout')
+                raise ValueError(error_str)
 
         return reached_state
 
@@ -868,109 +874,109 @@ class BattleTowerAAgent(BattleTowerAgent):
 
 
 if __name__ == '__main__':
-    # logging.basicConfig(level=logging.DEBUG)
+    logging.basicConfig(level=logging.DEBUG)
+
+    agent = BattleTowerAAgent(
+        render=True,
+        #db_interface=BattleTowerServerDBInterface()
+    )
+
+    agent.play()
+
+    # # NOTE: this is my debug stuff
+    # from pokemon_env import *
+    # import keyboard
+    # import win32api
+    # import win32gui
+    # import time
     #
-    # agent = BattleTowerAAgent(
-    #     render=True,
-    #     db_interface=BattleTowerServerDBInterface()
-    # )
+    # emu = DeSmuME()
+    # emu.open(ROM_FILE)
+    # emu.savestate.load_file(r'..\ROM\Name Save 2.dst')
+    # emu.volume_set(0)
     #
-    # agent.play()
-
-    # NOTE: this is my debug stuff
-    from pokemon_env import *
-    import keyboard
-    import win32api
-    import win32gui
-    import time
-
-    emu = DeSmuME()
-    emu.open(ROM_FILE)
-    emu.savestate.load_file(r'..\ROM\Name Save 2.dst')
-    emu.volume_set(0)
-
-
-    # Create the window for the emulator
-    window = emu.create_sdl_window()
-
-    # Get handle for desmume sdl window
-    window_handle = win32gui.FindWindow(None, "Desmume SDL")
-
-    checks = [
-        is_dialog_box,
-        is_save_dialog,
-        is_save_overwrite_dialog,
-        in_pokemon_select,
-        is_ready_for_battle_tower,
-        pokemon_is_fainted,
-        in_battle,
-        is_next_opponent_box,
-        won_set,
-        at_save_battle_video,
-        lost_set,
-        in_move_select,
-        our_pokemon_is_out,
-        opp_pokemon_is_out,
-    ]
-
-    CONTROLS = {
-        "enter": Keys.KEY_START,
-        "right shift": Keys.KEY_SELECT,
-        "q": Keys.KEY_L,
-        "w": Keys.KEY_R,
-        "a": Keys.KEY_Y,
-        "s": Keys.KEY_X,
-        "x": Keys.KEY_A,
-        "z": Keys.KEY_B,
-        "up": Keys.KEY_UP,
-        "down": Keys.KEY_DOWN,
-        "right": Keys.KEY_RIGHT,
-        "left": Keys.KEY_LEFT,
-    }
-    while not window.has_quit():
-        # Check if any buttons are pressed and process them
-        # I like to just whipe all keys first so that I don't have to worry about removing keys or whatnot
-        emu.input.keypad_rm_key(Keys.NO_KEY_SET)
-
-        for key, emulated_button in CONTROLS.items():
-            if keyboard.is_pressed(key):
-                emu.input.keypad_add_key(keymask(emulated_button))
-            else:
-                emu.input.keypad_rm_key(keymask(emulated_button))
-
-        screen_buffer = emu.display_buffer_as_rgbx()
-        screen_pixels = np.frombuffer(screen_buffer, dtype=np.uint8)
-        screen = screen_pixels[:SCREEN_PIXEL_SIZE_BOTH * 4]
-        screen = screen.reshape((SCREEN_HEIGHT_BOTH, SCREEN_WIDTH, 4))[..., :3]  # drop the alpha channel
-
-        if keyboard.is_pressed('t'):
-            image_path = os.path.join(DATA_DIR, 'Decision Making', input('Enter image path:') + '.PNG')
-            cv2.imwrite(image_path, screen)
-
-        # Check if touch screen is pressed and process it
-        if win32api.GetKeyState(0x01) < 0:
-            # Get coordinates of click relative to desmume window
-            x, y = win32gui.ScreenToClient(window_handle, win32gui.GetCursorPos())
-            # Adjust y coord to account for clicks on top (non-touch) screen
-            y -= SCREEN_HEIGHT
-
-            if x in range(0, SCREEN_WIDTH) and y in range(0, SCREEN_HEIGHT):
-                emu.input.touch_set_pos(x, y)
-            else:
-                emu.input.touch_release()
-        else:
-            emu.input.touch_release()
-
-        for check in checks:
-            if check(screen):
-                print(f'{check.__name__}: {check(screen)}')
-
-        if pokemon_is_fainted(screen):
-            print(get_party_status(screen))
-            print('Currently selecting slot # ', get_selected_pokemon_in_swap_screen(screen))
-
-        if is_next_opponent_box(screen):
-            print('Next opp:', get_battle_number(screen))
-
-        emu.cycle()
-        window.draw()
+    #
+    # # Create the window for the emulator
+    # window = emu.create_sdl_window()
+    #
+    # # Get handle for desmume sdl window
+    # window_handle = win32gui.FindWindow(None, "Desmume SDL")
+    #
+    # checks = [
+    #     is_dialog_box,
+    #     is_save_dialog,
+    #     is_save_overwrite_dialog,
+    #     in_pokemon_select,
+    #     is_ready_for_battle_tower,
+    #     pokemon_is_fainted,
+    #     in_battle,
+    #     is_next_opponent_box,
+    #     won_set,
+    #     at_save_battle_video,
+    #     lost_set,
+    #     in_move_select,
+    #     our_pokemon_is_out,
+    #     opp_pokemon_is_out,
+    # ]
+    #
+    # CONTROLS = {
+    #     "enter": Keys.KEY_START,
+    #     "right shift": Keys.KEY_SELECT,
+    #     "q": Keys.KEY_L,
+    #     "w": Keys.KEY_R,
+    #     "a": Keys.KEY_Y,
+    #     "s": Keys.KEY_X,
+    #     "x": Keys.KEY_A,
+    #     "z": Keys.KEY_B,
+    #     "up": Keys.KEY_UP,
+    #     "down": Keys.KEY_DOWN,
+    #     "right": Keys.KEY_RIGHT,
+    #     "left": Keys.KEY_LEFT,
+    # }
+    # while not window.has_quit():
+    #     # Check if any buttons are pressed and process them
+    #     # I like to just whipe all keys first so that I don't have to worry about removing keys or whatnot
+    #     emu.input.keypad_rm_key(Keys.NO_KEY_SET)
+    #
+    #     for key, emulated_button in CONTROLS.items():
+    #         if keyboard.is_pressed(key):
+    #             emu.input.keypad_add_key(keymask(emulated_button))
+    #         else:
+    #             emu.input.keypad_rm_key(keymask(emulated_button))
+    #
+    #     screen_buffer = emu.display_buffer_as_rgbx()
+    #     screen_pixels = np.frombuffer(screen_buffer, dtype=np.uint8)
+    #     screen = screen_pixels[:SCREEN_PIXEL_SIZE_BOTH * 4]
+    #     screen = screen.reshape((SCREEN_HEIGHT_BOTH, SCREEN_WIDTH, 4))[..., :3]  # drop the alpha channel
+    #
+    #     if keyboard.is_pressed('t'):
+    #         image_path = os.path.join(DATA_DIR, 'Decision Making', input('Enter image path:') + '.PNG')
+    #         cv2.imwrite(image_path, screen)
+    #
+    #     # Check if touch screen is pressed and process it
+    #     if win32api.GetKeyState(0x01) < 0:
+    #         # Get coordinates of click relative to desmume window
+    #         x, y = win32gui.ScreenToClient(window_handle, win32gui.GetCursorPos())
+    #         # Adjust y coord to account for clicks on top (non-touch) screen
+    #         y -= SCREEN_HEIGHT
+    #
+    #         if x in range(0, SCREEN_WIDTH) and y in range(0, SCREEN_HEIGHT):
+    #             emu.input.touch_set_pos(x, y)
+    #         else:
+    #             emu.input.touch_release()
+    #     else:
+    #         emu.input.touch_release()
+    #
+    #     for check in checks:
+    #         if check(screen):
+    #             print(f'{check.__name__}: {check(screen)}')
+    #
+    #     if pokemon_is_fainted(screen):
+    #         print(get_party_status(screen))
+    #         print('Currently selecting slot # ', get_selected_pokemon_in_swap_screen(screen))
+    #
+    #     if is_next_opponent_box(screen):
+    #         print('Next opp:', get_battle_number(screen))
+    #
+    #     emu.cycle()
+    #     window.draw()

@@ -438,7 +438,7 @@ if __name__ == '__main__':
 
     agent = MaxDamageAgent(
         render=False,
-        db_interface=BattleTowerServerDBInterface()
+        #db_interface=BattleTowerServerDBInterface()
     )
 
     agent.play()
