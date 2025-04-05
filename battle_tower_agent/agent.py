@@ -254,6 +254,96 @@ def get_selected_pokemon_in_swap_screen(frame):
 
     return matching_slot_id
 
+def our_pokemon_is_out(frame):
+    """
+    This function checks whether our pokemon is fully out (i.e. that we're in battle,
+    there is a name/HP bar, and that it isn't fainted/we're waiting for the next pokemon
+    """
+    # There's no good "one" check for the our's bar, so I am checking various key pixels
+    # (mostly at the far right b/c the name bar slides to the left when a pokemon faints)
+    # There is *one more* complication: unlike the opponent, our pokemon "bounces" up and down and the info bar does too
+    #  which means we actually have to check for three different positions
+
+    # this handles the "top" position (i.e. the tallest it gets), each other position is just 1 pixel down
+    key_pixels = [
+        ([119, 132], (40, 48, 40)), # far left sticking out dark pixel in the HP arrow bar
+        ([120, 129], (96, 72, 56)), # far left sticking out slightly brigher pixel in arrow bar
+        ([96, 147], (40, 48, 40)), # upper left gray corner of our pkmn box
+        ([133, 147], (40, 48, 40)), # lower left gray corner of our pkmn box
+    ]
+
+    is_top = check_key_pixels(frame, key_pixels)
+
+    if is_top:
+        return 1
+    else:
+        for pixel in key_pixels:
+            pixel[0][0] += 1 # each subsequent thing is one more pixel down
+
+        is_middle = check_key_pixels(frame, key_pixels)
+
+        if is_middle:
+            return 2
+        else:
+            for pixel in key_pixels:
+                pixel[0][0] += 1  # each subsequent thing is one more pixel down
+
+            is_bottom = check_key_pixels(frame, key_pixels)
+
+            if is_bottom:
+                return 3
+
+    # abusing the notation a bit here, but 0 means false, 1 means top, 2 means middle, 3 means bottom
+    return 0
+
+def opp_pokemon_is_out(frame):
+    """
+    This function checks whether the opponent's pokemon is fully out (i.e. that we're in battle,
+    there is a name/HP bar, and that it isn't fainted/we're waiting for the next pokemon
+    """
+    # There's no good "one" check for the opp's bar, so I am checking various key pixels
+    # (mostly at the far right b/c the name bar slides to the left when a pokemon faints)
+    key_pixels = [
+        ((44, 117), (40, 48, 40)), # far right sticking out dark pixel in the HP arrow bar
+        ((45, 120), (96, 72, 56)), # far right sticking out slightly brigher pixel in arrow bar
+        ((22, 108), (40, 48, 40)), # upper right gray corner of opp pkmn box
+        ((50, 108), (40, 48, 40)), # lower right gray corner of opp pkmn box
+    ]
+
+    return check_key_pixels(frame, key_pixels)
+
+def get_opponent_hp_bar(frame):
+    """This gets the opponent's Pokemon's current HP (as an integer from 0s to 100)"""
+    # while the bar technically has multiple rows, we only need the first (which makes indexing easier)
+    # also this *only* captures the HP bar, nothing surrounding it
+    hp_bar = frame[43, 50:98, :]
+
+    # any missing HP is black, easier to check for missing HP than current HP (b/c current can be red, yellow, or green)
+    missing_hp_color = np.array([0,0,0])
+    # NOTE: we can't just do hp_bar != missing_hp_color b/c some of the BGR values are 0, meaning we'd get false positives
+    # so instead we calculate the # of pixels that are black
+    remaining_hp_bar = np.any(hp_bar != missing_hp_color, axis=-1).sum()
+    remaining_hp = int(remaining_hp_bar / hp_bar.shape[0] * 100)
+
+    return remaining_hp
+
+def get_opponent_pokemon_info(frame):
+    """This gets the part of the frame containing the opponents pokemon's name, gender, and level"""
+    info = frame[27:37, 2:98, :]
+    return info
+
+def get_cur_pokemon_info(frame, position=1):
+    """
+    This gets the part of the frame containing our pokemon's name, gender, and level
+    Position refers to the top (1) middle (2) and bottom (3) possible positions for the "bouncing" pkmn info
+    """
+    # the constants (101 and 111) account for the fact that the position starts at 1, so for the top "bounce" ymin is 102 and ymax is 112
+    ymin = 101 + position
+    ymax = 111 + position
+
+    info = frame[ymin:ymax, 152:256, :]
+    return info
+
 class TowerState(Enum):
     WAITING = 0
     LOBBY = 1
@@ -778,108 +868,109 @@ class BattleTowerAAgent(BattleTowerAgent):
 
 
 if __name__ == '__main__':
-    logging.basicConfig(level=logging.DEBUG)
-
-    agent = BattleTowerAAgent(
-        render=True,
-        db_interface=BattleTowerServerDBInterface()
-    )
-
-    agent.play()
+    # logging.basicConfig(level=logging.DEBUG)
+    #
+    # agent = BattleTowerAAgent(
+    #     render=True,
+    #     db_interface=BattleTowerServerDBInterface()
+    # )
+    #
+    # agent.play()
 
     # NOTE: this is my debug stuff
-    # from pokemon_env import *
-    # import keyboard
-    # import win32api
-    # import win32gui
-    # import time
-    #
-    # emu = DeSmuME()
-    # emu.open(ROM_FILE)
-    # #emu.savestate.load_file('..\..\ROM\Pokemon - Platinum Battle Tower Search Team.dst')
-    # emu.volume_set(0)
-    #
-    #
-    # # Create the window for the emulator
-    # window = emu.create_sdl_window()
-    #
-    # # Get handle for desmume sdl window
-    # window_handle = win32gui.FindWindow(None, "Desmume SDL")
-    #
-    # checks = [
-    #     is_dialog_box,
-    #     is_save_dialog,
-    #     is_save_overwrite_dialog,
-    #     in_pokemon_select,
-    #     is_ready_for_battle_tower,
-    #     pokemon_is_fainted,
-    #     in_battle,
-    #     is_next_opponent_box,
-    #     won_set,
-    #     at_save_battle_video,
-    #     lost_set,
-    #     in_move_select,
-    # ]
-    #
-    # CONTROLS = {
-    #     "enter": Keys.KEY_START,
-    #     "right shift": Keys.KEY_SELECT,
-    #     "q": Keys.KEY_L,
-    #     "w": Keys.KEY_R,
-    #     "a": Keys.KEY_Y,
-    #     "s": Keys.KEY_X,
-    #     "x": Keys.KEY_A,
-    #     "z": Keys.KEY_B,
-    #     "up": Keys.KEY_UP,
-    #     "down": Keys.KEY_DOWN,
-    #     "right": Keys.KEY_RIGHT,
-    #     "left": Keys.KEY_LEFT,
-    # }
-    # while not window.has_quit():
-    #     # Check if any buttons are pressed and process them
-    #     # I like to just whipe all keys first so that I don't have to worry about removing keys or whatnot
-    #     emu.input.keypad_rm_key(Keys.NO_KEY_SET)
-    #
-    #     for key, emulated_button in CONTROLS.items():
-    #         if keyboard.is_pressed(key):
-    #             emu.input.keypad_add_key(keymask(emulated_button))
-    #         else:
-    #             emu.input.keypad_rm_key(keymask(emulated_button))
-    #
-    #     screen_buffer = emu.display_buffer_as_rgbx()
-    #     screen_pixels = np.frombuffer(screen_buffer, dtype=np.uint8)
-    #     screen = screen_pixels[:SCREEN_PIXEL_SIZE_BOTH * 4]
-    #     screen = screen.reshape((SCREEN_HEIGHT_BOTH, SCREEN_WIDTH, 4))[..., :3]  # drop the alpha channel
-    #
-    #     if keyboard.is_pressed('t'):
-    #         image_path = os.path.join(DATA_DIR, 'Decision Making', input('Enter image path:') + '.PNG')
-    #
-    #         cv2.imwrite(image_path, screen)
-    #
-    #     # Check if touch screen is pressed and process it
-    #     if win32api.GetKeyState(0x01) < 0:
-    #         # Get coordinates of click relative to desmume window
-    #         x, y = win32gui.ScreenToClient(window_handle, win32gui.GetCursorPos())
-    #         # Adjust y coord to account for clicks on top (non-touch) screen
-    #         y -= SCREEN_HEIGHT
-    #
-    #         if x in range(0, SCREEN_WIDTH) and y in range(0, SCREEN_HEIGHT):
-    #             emu.input.touch_set_pos(x, y)
-    #         else:
-    #             emu.input.touch_release()
-    #     else:
-    #         emu.input.touch_release()
-    #
-    #     for check in checks:
-    #         if check(screen):
-    #             print(f'{check.__name__}: {check(screen)}')
-    #
-    #     if pokemon_is_fainted(screen):
-    #         print(get_party_status(screen))
-    #         print('Currently selecting slot # ', get_selected_pokemon_in_swap_screen(screen))
-    #
-    #     if is_next_opponent_box(screen):
-    #         print('Next opp:', get_battle_number(screen))
-    #
-    #     emu.cycle()
-    #     window.draw()
+    from pokemon_env import *
+    import keyboard
+    import win32api
+    import win32gui
+    import time
+
+    emu = DeSmuME()
+    emu.open(ROM_FILE)
+    emu.savestate.load_file(r'..\ROM\Name Save 2.dst')
+    emu.volume_set(0)
+
+
+    # Create the window for the emulator
+    window = emu.create_sdl_window()
+
+    # Get handle for desmume sdl window
+    window_handle = win32gui.FindWindow(None, "Desmume SDL")
+
+    checks = [
+        is_dialog_box,
+        is_save_dialog,
+        is_save_overwrite_dialog,
+        in_pokemon_select,
+        is_ready_for_battle_tower,
+        pokemon_is_fainted,
+        in_battle,
+        is_next_opponent_box,
+        won_set,
+        at_save_battle_video,
+        lost_set,
+        in_move_select,
+        our_pokemon_is_out,
+        opp_pokemon_is_out,
+    ]
+
+    CONTROLS = {
+        "enter": Keys.KEY_START,
+        "right shift": Keys.KEY_SELECT,
+        "q": Keys.KEY_L,
+        "w": Keys.KEY_R,
+        "a": Keys.KEY_Y,
+        "s": Keys.KEY_X,
+        "x": Keys.KEY_A,
+        "z": Keys.KEY_B,
+        "up": Keys.KEY_UP,
+        "down": Keys.KEY_DOWN,
+        "right": Keys.KEY_RIGHT,
+        "left": Keys.KEY_LEFT,
+    }
+    while not window.has_quit():
+        # Check if any buttons are pressed and process them
+        # I like to just whipe all keys first so that I don't have to worry about removing keys or whatnot
+        emu.input.keypad_rm_key(Keys.NO_KEY_SET)
+
+        for key, emulated_button in CONTROLS.items():
+            if keyboard.is_pressed(key):
+                emu.input.keypad_add_key(keymask(emulated_button))
+            else:
+                emu.input.keypad_rm_key(keymask(emulated_button))
+
+        screen_buffer = emu.display_buffer_as_rgbx()
+        screen_pixels = np.frombuffer(screen_buffer, dtype=np.uint8)
+        screen = screen_pixels[:SCREEN_PIXEL_SIZE_BOTH * 4]
+        screen = screen.reshape((SCREEN_HEIGHT_BOTH, SCREEN_WIDTH, 4))[..., :3]  # drop the alpha channel
+
+        if keyboard.is_pressed('t'):
+            image_path = os.path.join(DATA_DIR, 'Decision Making', input('Enter image path:') + '.PNG')
+            cv2.imwrite(image_path, screen)
+
+        # Check if touch screen is pressed and process it
+        if win32api.GetKeyState(0x01) < 0:
+            # Get coordinates of click relative to desmume window
+            x, y = win32gui.ScreenToClient(window_handle, win32gui.GetCursorPos())
+            # Adjust y coord to account for clicks on top (non-touch) screen
+            y -= SCREEN_HEIGHT
+
+            if x in range(0, SCREEN_WIDTH) and y in range(0, SCREEN_HEIGHT):
+                emu.input.touch_set_pos(x, y)
+            else:
+                emu.input.touch_release()
+        else:
+            emu.input.touch_release()
+
+        for check in checks:
+            if check(screen):
+                print(f'{check.__name__}: {check(screen)}')
+
+        if pokemon_is_fainted(screen):
+            print(get_party_status(screen))
+            print('Currently selecting slot # ', get_selected_pokemon_in_swap_screen(screen))
+
+        if is_next_opponent_box(screen):
+            print('Next opp:', get_battle_number(screen))
+
+        emu.cycle()
+        window.draw()

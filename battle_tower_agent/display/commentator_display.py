@@ -334,7 +334,7 @@ def play_chat_audio_process(audio_queue: multiprocessing.Queue):
 
     while True:
         audio_file = audio_queue.get()
-        playsound(audio_file, block=False)
+        #playsound(audio_file, block=False)
 
 def create_video_dir() -> str:
     """Creates a new directory to store the frames and returns the full path"""
@@ -405,18 +405,18 @@ def main(display_for_twitch_streaming=True, agent_kwargs: dict = None):
     # okay this takes some explaining, but which you can find in the `play_chat_audio_process` fn
 
     if display_for_twitch_streaming:
-        audio_queue = multiprocessing.Queue()
-        audio_process = multiprocessing.Process(
-            target=play_chat_audio_process,
-            args=(audio_queue, ),
-        )
-
-        audio_process.start()
-
-        play_chat_audio = audio_queue.put
+        # audio_queue = multiprocessing.Queue()
+        # audio_process = multiprocessing.Process(
+        #     target=play_chat_audio_process,
+        #     args=(audio_queue, ),
+        # )
+        #
+        # audio_process.start()
+        #
+        # play_chat_audio = audio_queue.put
         # TODO: the text blip sound really messes w/ Twitch streaming, causing the audio and video to buffer a lot
         # Instead of playing an audio blip on chat, I'll play a message notification sound, but that is for future me.
-        #play_chat_audio = lambda audio: None
+        play_chat_audio = lambda audio: None
     else:
         play_chat_audio = partial(playsound, block=False)
 
@@ -657,7 +657,7 @@ def main(display_for_twitch_streaming=True, agent_kwargs: dict = None):
     gemini_thread.join()
 
     if display_for_twitch_streaming:
-        audio_process.join()
+        #audio_process.join()
         pass
 
     cv2.destroyAllWindows()
@@ -665,9 +665,12 @@ def main(display_for_twitch_streaming=True, agent_kwargs: dict = None):
 
 if __name__ == "__main__":
     from battle_tower_agent.agent import ROM_DIR
-    display_savestate = os.path.join(ROM_DIR, 'Pokemon - Platinum Battle Tower Animation.dst')
+    from battle_tower_agent.search_agent_v2 import BattleTowerSearchV2Agent
+    display_savestate = os.path.join(ROM_DIR, 'Pokemon - Platinum Battle Tower Search Team Animation.dst')
     agent_kwargs = {
-        'savestate_file': display_savestate,
+        # 'savestate_file': display_savestate,
+        #'agent_cls': BattleTowerSearchV2Agent,
+        #'search_swap': False,
         #'volume': 0
     }
     main(display_for_twitch_streaming=True, agent_kwargs=agent_kwargs)

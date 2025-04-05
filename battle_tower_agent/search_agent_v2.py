@@ -16,7 +16,6 @@ from battle_tower_agent.agent import (
     SEARCH_SAVESTATE_DIR,
     in_battle,
     ROM_DIR,
-    check_key_pixels,
     won_set,
     lost_set,
     pokemon_is_fainted,
@@ -25,6 +24,9 @@ from battle_tower_agent.agent import (
     in_move_select,
     is_next_opponent_box,
     at_save_battle_video,
+    opp_pokemon_is_out,
+    get_opponent_hp_bar,
+    get_opponent_pokemon_info,
 )
 
 from battle_tower_agent.search_agent import InvalidMoveSelected
@@ -44,43 +46,6 @@ HP_PER_POKEMON = 100
 
 # minor optimization here, if we haven't either fainted or won by 10 turns (chosen somewhat arbitrarily) then we probably have a good idea of the search space
 SUBAGENT_STOPPING_TURN = 10
-
-def opp_pokemon_is_out(frame):
-    """
-    This function checks whether the opponent's pokemon is fully out (i.e. that we're in battle,
-    there is a name/HP bar, and that it isn't fainted/we're waiting for the next pokemon
-    """
-    # There's no good "one" check for the opp's bar, so I am checking various key pixels
-    # (mostly at the far right b/c the name bar slides to the left when a pokemon faints)
-    key_pixels = [
-        ((44, 117), (40, 48, 40)), # far right sticking out dark pixel in the HP arrow bar
-        ((45, 120), (96, 72, 56)), # far right sticking out slightly brigher pixel in arrow bar
-        ((22, 108), (40, 48, 40)), # upper right gray corner of opp pkmn box
-        ((50, 108), (40, 48, 40)), # lower right gray corner of opp pkmn box
-    ]
-
-    return check_key_pixels(frame, key_pixels)
-
-
-def get_opponent_hp_bar(frame):
-    """This gets the opponent's Pokemon's current HP (as an integer from 0s to 100)"""
-    # while the bar technically has multiple rows, we only need the first (which makes indexing easier)
-    # also this *only* captures the HP bar, nothing surrounding it
-    hp_bar = frame[43, 50:98, :]
-
-    # any missing HP is black, easier to check for missing HP than current HP (b/c current can be red, yellow, or green)
-    missing_hp_color = np.array([0,0,0])
-    # NOTE: we can't just do hp_bar != missing_hp_color b/c some of the BGR values are 0, meaning we'd get false positives
-    # so instead we calculate the # of pixels that are black
-    remaining_hp_bar = np.any(hp_bar != missing_hp_color, axis=-1).sum()
-    remaining_hp = int(remaining_hp_bar / hp_bar.shape[0] * 100)
-
-    return remaining_hp
-
-def get_opponent_pokemon_name(frame):
-    """This gets the part of the frame containing the pokemon's name, gender, and level"""
-    name = frame[27:37, 2:98, :]
-    return name
 
 class SwappedPokemon(Exception):
     pass
@@ -110,7 +75,7 @@ class HPWatcher:
     def __call__(self, cur_frame):
         if opp_pokemon_is_out(cur_frame):
             opp_hp = get_opponent_hp_bar(cur_frame)
-            opp_pkmn = get_opponent_pokemon_name(cur_frame)
+            opp_pkmn = get_opponent_pokemon_info(cur_frame)
 
             if self.opp_pkm is None or (opp_pkmn != self.opp_pkm).any():
                 self.opp_pkm = opp_pkmn
@@ -150,7 +115,7 @@ class BattleTowerSearchV2SubAgent(BattleTowerAgent):
             swap_to: before making a move, swap to the pokemon in that idx (can be none)
             damage_value: a multiprocessing Value used to keep track of the damage dealt thus far by the subagent
         """
-        super().__init__(render=False, savestate_file=savestate_file)
+        super().__init__(render=True, savestate_file=savestate_file)
 
         if isinstance(moves, int):
             moves = [moves]
@@ -623,7 +588,12 @@ class BattleTowerSearchV2Agent(BattleTowerAgent):
         best_result = None
         completed_searches = 0
         while best_result is None and completed_searches < len(processes):
-            result: SearchResultMessage = self.result_queue.get(block=True)
+            result: SearchResultMessage = None
+            while not result:
+                try:
+                    result = self.result_queue.get(block=False)
+                except:
+                    self._act()
             completed_searches += 1
 
             won_battle = result.won
