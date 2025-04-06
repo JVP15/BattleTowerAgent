@@ -21,7 +21,10 @@ from battle_tower_agent.battle_tower_database.interface import BattleTowerDBInte
 SCRIPT_DIR = os.path.join(DATA_DIR, 'damage_calculator')
 os.makedirs(SCRIPT_DIR, exist_ok=True)
 
-MAX_DAMAGE_TEAM_SAVESTATE = os.path.join(ROM_DIR, 'Pokemon - Platinum Battle Tower Max Damage.dst')
+if os.name == 'nt':
+    MAX_DAMAGE_TEAM_SAVESTATE = os.path.join(ROM_DIR, 'Pokemon - Platinum Battle Tower Max Damage.dst')
+else:
+    MAX_DAMAGE_TEAM_SAVESTATE = os.path.join(ROM_DIR, 'Pokemon - Platinum Battle Tower Max Damage Linux.dst')
 
 logger = logging.getLogger('MaxPower') # it's a reference
 
@@ -437,8 +440,8 @@ if __name__ == '__main__':
     logging.basicConfig(level=logging.DEBUG)
 
     agent = MaxDamageAgent(
-        render=False,
-        #db_interface=BattleTowerServerDBInterface()
+        render=True,
+        db_interface=BattleTowerServerDBInterface()
     )
 
     agent.play()
