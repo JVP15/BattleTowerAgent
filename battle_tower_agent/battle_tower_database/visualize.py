@@ -20,8 +20,8 @@ DB_PATH = os.path.join(ROOT_DIR, 'battle_tower_agent', 'battle_tower_database', 
 
 dotenv.load_dotenv(os.path.join(ROOT_DIR, '.env'))
 
-#MODEL_NAME = 'gemini-2.0-flash-thinking-exp-01-21'
-MODEL_NAME = 'gemini-2.5-pro-preview-03-25'
+MODEL_NAME = 'gemini-2.0-flash-thinking-exp-01-21'
+#MODEL_NAME = 'gemini-2.5-pro-preview-03-25'
 
 # What % of streaks with the strategy "A" make it to battle 22? How about 50? What about for the strategy "max_damage"?
 SCHEMA = """TABLES:

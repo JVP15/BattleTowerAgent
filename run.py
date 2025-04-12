@@ -7,6 +7,7 @@ from battle_tower_agent.agent import BattleTowerAAgent
 from battle_tower_agent.battle_tower_database.visualize import run_terminal_loop
 from battle_tower_agent.search_agent import BattleTowerSearchAgent
 from battle_tower_agent.search_agent_v2 import BattleTowerSearchV2Agent
+from battle_tower_agent.max_agent import BattleTowerMaxDamageAgent
 
 from battle_tower_agent.battle_tower_database.interface import BattleTowerServerDBInterface
 
@@ -32,8 +33,8 @@ def parse_args():
 
     # Mutually exclusive group for the main modes
     group = parser.add_mutually_exclusive_group(required=True) # Ensure one of these is required
-    group.add_argument('--strategy', type=str, choices=['a', 'search_v1', 'search_v2'],
-                       help='Runs the Battle Tower Agent with using the provided strategy (choose from: a, search_v1, search_v2).')
+    group.add_argument('--strategy', type=str, choices=['a', 'search_v1', 'search_v2', 'max_damage'],
+                       help='Runs the Battle Tower Agent with using the provided strategy (choose from: a, search_v1, search_v2, max_damage).')
 
     group.add_argument('--server', action='store_true', help= ("Runs the database server."
                                                                " This lets the agent save it's stats (battle #s, streak lengths, etc)"
@@ -83,6 +84,8 @@ def main():
             agent = BattleTowerSearchAgent(render=args.render, db_interface=db_interface, **savestate_kwargs)
         elif args.strategy == 'search_v2':
             agent = BattleTowerSearchV2Agent(render=args.render, db_interface=db_interface, **savestate_kwargs)
+        elif args.strategy == 'max_damage':
+            agent = BattleTowerMaxDamageAgent(render=args.render, db_interface=db_interface, **savestate_kwargs)
         else:
             raise ValueError('Invalid strategy provided. Supported strategies are [a, search_v1, search_v2')
 

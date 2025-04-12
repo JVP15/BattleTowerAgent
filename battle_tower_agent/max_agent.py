@@ -247,7 +247,7 @@ try {{
 
 
 
-class MaxDamageAgent(BattleTowerAgent):
+class BattleTowerMaxDamageAgent(BattleTowerAgent):
 
     strategy = 'max_damage'
 
@@ -453,9 +453,9 @@ class MaxDamageAgent(BattleTowerAgent):
 if __name__ == '__main__':
     logging.basicConfig(level=logging.DEBUG)
 
-    agent = MaxDamageAgent(
-        render=True,
-        #db_interface=BattleTowerServerDBInterface()
+    agent = BattleTowerMaxDamageAgent(
+        render=False,
+        db_interface=BattleTowerServerDBInterface()
     )
 
     agent.play()

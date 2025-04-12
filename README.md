@@ -90,11 +90,12 @@ Once you have the ROM, put it in the `ROM` folder and name it `Pokemon - Platinu
 
 Right now, this repo has 3 strategies/agents. 
 
-| Strategy  | Win Streak | Usage                  | Notes                                                                                                                                                               |
-|-----------|------------|------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| A         | 115        | '--strategy a'         | Throughout the entire Battle Tower, this agent only hits the 'A' button. There is no decision making and yet it still handily beats Palmer                          |
+| Strategy  | Win Streak | Usage                  | Notes                                                                                                                                                             |
+|-----------|------------|------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| A         | 115        | '--strategy a'         | Throughout the entire Battle Tower, this agent only hits the 'A' button. There is no decision making and yet it still handily beats Palmer                        |
 | Search v1 | 383        | '--strategy search_v1' | This is a 'basic' search that chooses each possible move, plays the game until the end, and then chooses the move that won, or at least ended the game the quickest |
-| Search v2 | 1227[^1]   | '--strategy search_v2' | This uses an improved search algorithm that tracts damage dealt, searches over which Pokémon to swap to, and has a number of efficiency improvements.               |
+| Search v2 | 1227[^1]   | '--strategy search_v2' | This uses an improved search algorithm that tracts damage dealt, searches over which Pokémon to swap to, and has a number of efficiency improvements.             |
+| Max Damage| 147 | '--strategy max_damage' | This is the classic "pick the strongest move" strategy                                                                                                            |
 
 [^1]: When the v2 Search agent got the 1227 winstreak, searching over the next Pokémon to swap to wasn't available.
 

@@ -666,12 +666,12 @@ def main(display_for_twitch_streaming=True, agent_kwargs: dict = None):
 if __name__ == "__main__":
     from battle_tower_agent.agent import ROM_DIR
     from battle_tower_agent.search_agent_v2 import BattleTowerSearchV2Agent
-    from battle_tower_agent.max_agent import MaxDamageAgent
+    from battle_tower_agent.max_agent import BattleTowerMaxDamageAgent
 
     display_savestate = os.path.join(ROM_DIR, 'Pokemon - Platinum Battle Tower Max Damage Animation.dst')
     agent_kwargs = {
         'savestate_file': display_savestate,
-        'agent_cls': MaxDamageAgent,
+        'agent_cls': BattleTowerMaxDamageAgent,
         #'search_swap': False,
         #'volume': 0
     }
