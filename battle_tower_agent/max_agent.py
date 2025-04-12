@@ -14,11 +14,11 @@ from battle_tower_agent.agent import (
     REF_IMG_DIR,
     get_opponent_pokemon_info,
     get_cur_pokemon_info, TowerState, in_battle, in_move_select, pokemon_is_fainted,
-    is_next_opponent_box, at_save_battle_video, opp_pokemon_is_out, our_pokemon_is_out
+    is_next_opponent_box, at_save_battle_video, opp_pokemon_is_out, our_pokemon_is_out, get_opponent_hp_bar
 )
 from battle_tower_agent.battle_tower_database.interface import BattleTowerDBInterface, BattleTowerServerDBInterface
 
-SCRIPT_DIR = os.path.join(DATA_DIR, 'damage_calculator')
+SCRIPT_DIR = os.path.join(DATA_DIR, 'tmp')
 os.makedirs(SCRIPT_DIR, exist_ok=True)
 
 if os.name == 'nt':
@@ -48,7 +48,8 @@ INDIVIDUAL_CHARS = np.stack(np.split(CHAR_IMAGE, len(IDX_TO_CHAR), axis=1))
 #  which is why I make a special case for them.
 NAME_PREFIX_TO_PKMN = {
     'MR.': 'MR. MIME',
-    'MIME': 'MIME JR.'
+    'MIME': 'MIME JR.',
+    'FARFETCHD': "FARFETCH`D", #  we also don't have the little ` so we have to deal withi Farfetch`d specially
 }
 
 def extract_pokemon_name(info: np.ndarray) -> str:
@@ -120,8 +121,8 @@ GARCHOMP_SUICUNE_SCIZOR_TEAM = {
         "evs": {"hp": 4, "atk": 252, "spe": 252},
         "nature": "Jolly",
         "moves": [
+            "Earthquake", # I put EQ first b/c all else considered, if both it and Outrage will KO, that is fine w/ me.
             "Outrage",
-            "Earthquake", # I want to put EQ first b/c it should be chosen more often but... see my explanation in _select_move
             "Flamethrower",
             "Crunch"
         ]
@@ -131,10 +132,10 @@ GARCHOMP_SUICUNE_SCIZOR_TEAM = {
         "ability": "Pressure",
         "evs": {
             "hp": 252,
-            "def": 252,
+            "spa": 252,
             "spd": 4
         },
-        "nature": "Calm",
+        "nature": "Modest",
         "ivs": {"atk": 0},
         "moves": [
             "Surf",
@@ -361,16 +362,24 @@ class MaxDamageAgent(BattleTowerAgent):
             damage_results = self._calculate_move_damages()
             if damage_results is None: # gotta check for an error here
                 return 0 # just go w/ the first and "best" move
-            # calculate move damages is a dict but to speed things along, we only really need an array
+            # calculate move damages but  we only really need the array
             self.move_damage_cache = np.array(list(damage_results.values()))
+
+            #  TODO: handle possible EVs
 
             logger.debug(f'{self.cur_pkmn_name} vs {self.opp_pkmn_name} move damage: {damage_results}')
 
-            # it doesn't really matter how much move we do if it'll KO the opponent (TODO: handle possible EVs)
-            self.move_damage_cache[self.move_damage_cache > 1] = 1
+        # optimization: we may as well just choose the move that goes for the kill instead of the most damage
+        if opp_pokemon_is_out(self.cur_frame):
+            opp_hp = get_opponent_hp_bar(self.cur_frame) / 100 # HP bar is 0-100, we want 0-1
+        else:
+            opp_hp = 1
+
+        move_damages = self.move_damage_cache.copy()
+        move_damages[move_damages > opp_hp] = opp_hp
 
         # okay due to the problem below this... doesn't actually get chosen but that's a bug for another day
-        move = np.argmax(self.move_damage_cache)
+        move = np.argmax(move_damages)
 
         return move
 
@@ -380,18 +389,16 @@ class MaxDamageAgent(BattleTowerAgent):
         if self.move_damage_cache is None:
             return super()._execute_move(move)
 
-        move_cache = self.move_damage_cache
-        best_to_worst_moves = np.argsort(move_cache)[::-1] # argsort goes ascending, but we need descending
+        move_damages = self.move_damage_cache.copy()
 
         # this is a bit of a pain; numpy preserves the ordering of elements while sorting, so if 0 and 1 both have the same value we'd get ... 0, 1
-        # and since we want descending, it'd go 1, 0, 3, 4... which is why even though EQ is the 2nd move on the list, it's chosen more than outrage
-        # which is a good thing in practise but I don't like this interaction
+        # and since we want descending, it'd go 1, 0, 3, 4... so I can't just np.argsort(move_cache)[::-1] b/c I want it go go like 0, 1, ...
 
         state = self.state
 
         advanced_game = False
-        for chosen_move in best_to_worst_moves:
-            self._goto_move(chosen_move)
+        for _ in range(len(move_damages)):
+            self._goto_move(move)
 
             self._general_button_press('A')
             state = self._wait_for_battle_states()
@@ -403,6 +410,13 @@ class MaxDamageAgent(BattleTowerAgent):
                 self.state = TowerState.BATTLE  # this is important b/c we need to reset the state back to BATTLE
 
                 break
+
+            # bit of a hack, but this basically lets re-use the select_move code while masking all moves that failed
+            tmp_damage_cache = self.move_damage_cache
+            move_damages[move] = -1 # essentially will never be chosen
+            self.move_damage_cache = move_damages
+            move = self._select_move()
+            self.move_damage_cache = tmp_damage_cache
 
         if not advanced_game:
             self._log_error_image('could_not_make_move', state)
@@ -441,7 +455,7 @@ if __name__ == '__main__':
 
     agent = MaxDamageAgent(
         render=True,
-        db_interface=BattleTowerServerDBInterface()
+        #db_interface=BattleTowerServerDBInterface()
     )
 
     agent.play()

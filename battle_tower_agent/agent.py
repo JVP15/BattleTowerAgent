@@ -36,9 +36,9 @@ os.makedirs(SEARCH_SAVESTATE_DIR, exist_ok=True)
 BUTTON_PRESS_DURATION = 5
 AFTER_PRESS_WAIT = 30 # I have no good justification for this, we just need to spend some amount of time waiting for the game to process our input
 
-# a full battle may take about 10k frames, and if it takes that much time while *waiting* for something,
+# a full battle may take about 20k frames, and if it takes that much time while *waiting* for something,
 # then something probably went wrong
-MAX_WAIT_CYCLES = 10_000
+MAX_WAIT_CYCLES = 20_000
 
 DATA_DIR = os.path.join(ROOT_DIR, 'data')
 REF_IMG_DIR = os.path.join(DATA_DIR, 'reference_images')
