@@ -49,7 +49,7 @@ INDIVIDUAL_CHARS = np.stack(np.split(CHAR_IMAGE, len(IDX_TO_CHAR), axis=1))
 NAME_PREFIX_TO_PKMN = {
     'MR.': 'MR. MIME',
     'MIME': 'MIME JR.',
-    'FARFETCHD': "FARFETCH`D", #  we also don't have the little ` so we have to deal withi Farfetch`d specially
+    'FARFETCH': "FARFETCH`D", #  we also don't have the little ` so we have to deal withi Farfetch`d specially
 }
 
 def extract_pokemon_name(info: np.ndarray) -> str:

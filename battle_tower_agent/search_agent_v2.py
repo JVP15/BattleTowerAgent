@@ -353,7 +353,7 @@ class BattleTowerSearchV2Agent(BattleTowerAgent):
         savestate_file=SEARCH_TEAM_SAVESTATE,
         db_interface: BattleTowerDBInterface = None,
         depth=1,
-        search_swap=True,
+        search_swap=False,
         team=GARCHOMP_SUICUNE_SCIZOR_TEAM,
     ):
         """
@@ -369,7 +369,7 @@ class BattleTowerSearchV2Agent(BattleTowerAgent):
             depth: How many combinations of moves that we'll try, although it's more like a class than an actual # of steps we'll go down the tree
                 If depth is 1 or 2, it's all possible permutations of move 1 or 2 nodes down the tree.
                 Actually, only depths of 1 and 2 are supported.
-            search_swap: Whether to search over the possible swaps when a Pokemon faints. Slightly worse overall, but saves on compute.
+            search_swap: Whether to search over the possible swaps when a Pokemon faints, wasn't used in the record 1227 run and is buggy so disabled right now
             team: The team (in Pokemon Showdown format) used in the battle tower.
                 By default, goes with the team that is chosen with the default savestate.
         """
@@ -380,6 +380,7 @@ class BattleTowerSearchV2Agent(BattleTowerAgent):
         self.strategy = f'search_v2_depth_{depth}'
 
         if search_swap:
+            raise NotImplementedError('Searching over swapped pokemon is buggy right now so has been disabled')
             self.strategy += '_swap'
 
         self.team = team
@@ -410,17 +411,7 @@ class BattleTowerSearchV2Agent(BattleTowerAgent):
         self.savestate_file_queues = [Queue() for _ in range(len(self.possible_moves))]
         self.search_stop_barrier = Barrier(len(self.possible_moves) + 1) # The +1 is for this process
 
-        # on linux, desmume needs to use forkserver (maybe spawn is acceptable? haven't tested), but on windows, the default works just fine
-        # TODO: this doesn't work yet
-        ctx = multiprocessing.get_context('forkserver' if os.name == 'posix' else None)
         self.processes = []
-        for i, move_list in enumerate(self.possible_moves):
-            p = ctx.Process(
-                target=init_search_process, # args look like savestate_queue, move_list, swap_to (set to None), result_queue, stop_event, stop_barrier, and damage
-                args=(self.savestate_file_queues[i], move_list, None, self.result_queue, self.stop_event, self.search_stop_barrier, self.damage_values[i])
-            )
-            self.processes.append(p)
-            p.start()
 
         # we basically re-create everything above (except for the stop event)
         # seperately for searching over swapped pokemon b/c there are only certain conditions to search for swap
@@ -431,17 +422,34 @@ class BattleTowerSearchV2Agent(BattleTowerAgent):
         self.swap_stop_barrier = Barrier(num_swap_searches + 1)
 
         self.swap_processes = []
-        for i, move_list in enumerate(range(num_swap_searches)):
-            swapped_pkmn = i // POKEMON_MAX_MOVES + 1 # the "swap_to" pokemon starts from 1
-            p = ctx.Process(
-                target=init_search_process, # args look like savestate_queue, move_list, swap_to, result_queue, stop_event, stop_barrier, and damage
-                args=(self.swap_savestate_file_queues[i], move_list, swapped_pkmn, self.result_queue, self.stop_event, self.swap_stop_barrier, self.swap_damage_values[i])
-            )
-            self.swap_processes.append(p)
-            p.start()
+
+        self._start_search_processes()
 
         # now it's actually worthwhile keeping track of the # of Pokemon we have b/c we don't need to swap if we only have 1 pokemon in the back
         self.healthy_pokemon = NUM_POKEMON_IN_SINGLES
+
+    def _start_search_processes(self):
+        # TODO: there seems to be problems with mutliprocessing on WSL (at least for windows 10), investigate later
+        ctx = multiprocessing.get_context('forkserver' if os.name == 'posix' else None)
+        for i, move_list in enumerate(self.possible_moves):
+            p = ctx.Process(
+                target=init_search_process, # args look like savestate_queue, move_list, swap_to (set to None), result_queue, stop_event, stop_barrier, and damage
+                args=(self.savestate_file_queues[i], move_list, None, self.result_queue, self.stop_event, self.search_stop_barrier, self.damage_values[i])
+            )
+            self.processes.append(p)
+            p.start()
+
+        if self.search_swap:
+            for i in range(len(self.swap_damage_values)):
+                swapped_pkmn = i // POKEMON_MAX_MOVES + 1 # the "swap_to" pokemon starts from 1
+
+                # TODO: even w/ a larger depth, we don't want to search over more than just the first move for each pkmn, so I need a different way to send over the move list
+                p = ctx.Process(
+                    target=init_search_process, # args look like savestate_queue, move_list, swap_to, result_queue, stop_event, stop_barrier, and damage
+                    args=(self.swap_savestate_file_queues[i], self.possible_moves[i % len(self.possible_moves)], swapped_pkmn, self.result_queue, self.stop_event, self.swap_stop_barrier, self.swap_damage_values[i])
+                )
+                self.swap_processes.append(p)
+                p.start()
 
 
     def _run_battle_loop(self) -> TowerState:
