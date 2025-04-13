@@ -6,7 +6,10 @@ import tempfile
 
 import matplotlib.pyplot as plt
 import numpy as np
-import google.generativeai as genai
+from google import genai
+from google.genai import types
+
+
 import os
 
 import dotenv
@@ -88,24 +91,26 @@ def execute_code_in_subprocess(code_string, db_path=DB_PATH):
     stdout = process.stdout
     stderr = process.stderr
 
-    #if os.path.exists(tmp_file_path):
-    #    os.remove(tmp_file_path)
+    if os.path.exists(tmp_file_path):
+       os.remove(tmp_file_path)
 
     return stdout, stderr
 
 
 def run_terminal_loop(model_name, db_path=DB_PATH):
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-    print(f'{ROOT_DIR=}')
-    print(os.path.join(ROOT_DIR, '.env'))
 
     if GEMINI_API_KEY is None:
         raise ValueError('You must have `GEMINI_API_KEY` set in the environment (or .env file) to let Gemini query the DB.')
 
-    genai.configure(api_key=GEMINI_API_KEY)
+    client = genai.Client(
+        api_key=os.environ.get("GEMINI_API_KEY"),
+    )
 
-    model = genai.GenerativeModel(model_name=model_name, system_instruction=SYSTEM_PROMPT)
-    chat = model.start_chat()
+    chat = client.chats.create(
+        model=MODEL_NAME,
+        config=types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT)
+    )
 
     print(f'Connected to database, {model_name} is ready to respond to your queries. Enter (q)uit to exit the loop.')
 
@@ -115,7 +120,7 @@ def run_terminal_loop(model_name, db_path=DB_PATH):
 
         prompt = PROMPT.format(user_prompt=user_prompt)
 
-        response = chat.send_message(content=prompt).text
+        response = chat.send_message(prompt).text
 
         print(model_name,  'response:\n', response)
 

@@ -18,6 +18,7 @@ setup(
         'flask',
         # required for gemini
         'google-genai',
+        'matplotlib',
         # required for the UI
         'playsound==1.2.2',
         'ffmpeg-python'

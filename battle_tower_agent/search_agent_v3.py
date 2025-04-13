@@ -1,6 +1,9 @@
+import json
 import logging
 import multiprocessing
 import os
+import subprocess
+import tempfile
 import traceback
 import uuid
 
@@ -27,9 +30,10 @@ from battle_tower_agent.agent import (
     at_save_battle_video,
     opp_pokemon_is_out,
     get_opponent_hp_bar,
-    get_opponent_pokemon_info,
+    get_opponent_pokemon_info, get_cur_pokemon_info, our_pokemon_is_out,
 )
-from battle_tower_agent.max_agent import BattleTowerMaxDamageAgent, dict_to_pokemon_sets_string
+from battle_tower_agent.max_agent import BattleTowerMaxDamageAgent, dict_to_pokemon_sets_string, JS_TEMPLATE, \
+    extract_pokemon_name, SCRIPT_DIR
 
 from battle_tower_agent.search_agent import InvalidMoveSelected
 
@@ -44,8 +48,7 @@ logger = logging.getLogger('SearchTowerAgent')
 if os.name == 'nt':
     SEARCH_TEAM_SAVESTATE = os.path.join(ROM_DIR, 'Pokemon - Platinum Battle Tower Search V3 Team.dst')
 else:
-    raise NotImplementedError("We don't have a linux savestate for this yet")
-    #SEARCH_TEAM_SAVESTATE = os.path.join(ROM_DIR, 'Pokemon - Platinum Battle Tower Search Team Linux.dst')
+    SEARCH_TEAM_SAVESTATE = os.path.join(ROM_DIR, 'Pokemon - Platinum Battle Tower Search V3 Team Linux.dst')
 
 
 class BattleTowerSearchV3SubAgentBattleTower(BattleTowerMaxDamageAgent):
@@ -70,7 +73,7 @@ class BattleTowerSearchV3SubAgentBattleTower(BattleTowerMaxDamageAgent):
             swap_to: before making a move, swap to the pokemon in that idx (can be none)
             damage_value: a multiprocessing Value used to keep track of the damage dealt thus far by the subagent
         """
-        super().__init__(render=True, savestate_file=savestate_file, team=team)
+        super().__init__(render=False, savestate_file=savestate_file, team=team)
 
         if isinstance(moves, int):
             moves = [moves]
@@ -330,6 +333,21 @@ class BattleTowerSearchV3Agent(BattleTowerSearchV2Agent):
 
         self.strategy = f'search_v3_depth_{depth}'
 
+        # until I refactor the max damage stuff into a mixin, I need add this in manually
+        # plus I want to play Pokemon roms right now while I let the search run so... gotta make this quick
+
+        self.cur_pkmn_info = None
+        self.cur_pkmn_name = None
+
+        self.opp_pkmn_info = None
+        self.opp_pkmn_name = None
+
+        self.move_damage_cache = None
+
+        self.team = dict_to_pokemon_sets_string(team)
+        self.team_dict = team
+
+
     # this gets called in the search agent's init fn
     def _start_search_processes(self):
         # TODO: there seems to be problems with mutliprocessing on WSL (at least for windows 10), investigate later
@@ -344,14 +362,204 @@ class BattleTowerSearchV3Agent(BattleTowerSearchV2Agent):
 
         # TODO: support swapping
 
+    def _get_pokemon_names(self, frame):
+        # realistically, we don't even need to get the opponent's name in move select, just in-battle will work!
+        #  this does mean that multi-turn moves (e.g. Outrage) won't get a new name whenever we cause a Pokemon to faint but that should be fine
+        if self.state == TowerState.BATTLE:
+            # we need to keep track of both our pokemon and our opponent's
+            pokemon_info_position = our_pokemon_is_out(frame)
+            if pokemon_info_position:
+                cur_info = get_cur_pokemon_info(frame, position=pokemon_info_position)
+                if self.cur_pkmn_name is None or (cur_info != self.cur_pkmn_info).any():
+                    self.cur_pkmn_info = cur_info
+                    self.cur_pkmn_name = extract_pokemon_name(cur_info)
+
+                    # anytime we change or our opponent changes pokemon, we have to re-calculate the move damages
+                    self.move_damage_cache = None
+
+            if opp_pokemon_is_out(frame):
+                opp_info = get_opponent_pokemon_info(frame)
+                if self.opp_pkmn_info is None or (opp_info != self.opp_pkmn_info).any():
+                    self.opp_pkmn_info = opp_info
+                    self.opp_pkmn_name = extract_pokemon_name(opp_info)
+
+                    self.move_damage_cache = None
+
+        # since we're kinda hacking `wait_for`, it needs to return a bool to indicate that the check failed
+        return False
+
+    def _calculate_move_damages(self):
+        """
+        Calculates the damage (to be conservative, I take the min) for each move against an opponent,
+        considering all opponent abilities. Damages are normalized so that 0 is no damage and 1 is a full HP bar (can be > than 1)
+
+        Returns:
+            dict: A dictionary mapping move names to calculated damage or None if an error occurred.
+
+        NOTE: I'm working w/ a dict right now b/c it's nice to see how much each move does, but this may change to an array in the future.
+        """
+        pkmn_name = self.cur_pkmn_name.title() # it's normally in ALL_CAPS but the names in the dict are not
+        details_json = json.dumps(self.team_dict[pkmn_name])
+
+        # Fill the JavaScript template
+        js_code = JS_TEMPLATE.format(
+            our_pkmn_name=pkmn_name,
+            our_pkmn_details_json=details_json,
+            opponent_pkmn_name=self.opp_pkmn_name
+        )
+
+        # I just found out that tempfile exists, maybe I should use it for savestates too...
+        js_file = None
+        damage_results = None
+        try:
+            # Create a temporary file with .js extension
+            # delete=False is important on Windows, manually delete later
+            js_file = tempfile.NamedTemporaryFile(mode='w', suffix='.js', delete=False, encoding='utf-8', dir=SCRIPT_DIR)
+            js_filepath = js_file.name
+
+            js_file.write(js_code)
+            js_file.close()  # Close the file handle before letting node access it
+
+            # Ensure node is in your PATH or provide the full path
+            process = subprocess.run(
+                ['node', js_filepath],
+                capture_output=True,
+                text=True,  # Decodes stdout/stderr automatically
+                check=False,
+                encoding='utf-8'
+            )
+
+            # the code *shouldn't* break (since it already runs) but... ya never know
+            if process.returncode != 0:
+                logger.warning(f"Error executing Node.js script:\n {process.stderr}")
+            else:
+                damage_results = json.loads(process.stdout)
+
+        except FileNotFoundError:
+            logger.error("Error: 'node' command not found. Is Node.js installed and in your PATH?")
+        finally:
+            # --- Cleanup ---
+            if js_file and os.path.exists(js_filepath):
+                try:
+                    os.remove(js_filepath)
+                except OSError as e:
+                    logger.warning(f"Warning: Could not remove temporary file {js_filepath}: {e}")
+
+        return damage_results
+
+    def _max_damage_select_move(self):
+        if self.move_damage_cache is None:
+            damage_results = self._calculate_move_damages()
+            if damage_results is None: # gotta check for an error here
+                return 0 # just go w/ the first and "best" move
+            # calculate move damages but  we only really need the array
+            self.move_damage_cache = np.array(list(damage_results.values()))
+
+            #  TODO: handle possible EVs
+
+            logger.debug(f'{self.cur_pkmn_name} vs {self.opp_pkmn_name} move damage: {damage_results}')
+
+        # optimization: we may as well just choose the move that goes for the kill instead of the most damage
+        if opp_pokemon_is_out(self.cur_frame):
+            opp_hp = get_opponent_hp_bar(self.cur_frame) / 100 # HP bar is 0-100, we want 0-1
+        else:
+            opp_hp = 1
+
+        move_damages = self.move_damage_cache.copy()
+        move_damages[move_damages > opp_hp] = opp_hp
+
+        # okay due to the problem below this... doesn't actually get chosen but that's a bug for another day
+        move = np.argmax(move_damages)
+
+        return move
+
+
+    def _select_move(self) -> int:
+        # basically this is the v2 search
+        if self.winning_move_list is None:
+            move = super()._select_move()
+        # v2 search w/ a cached move list (i.e. we know it's going to go 1, then 0, then max_damage)
+        elif self.winning_move_idx < len(self.winning_move_list):
+            move = self.winning_move_list[self.winning_move_idx]
+        # and for the "default" move we use the max damage stuff
+        else:
+            move = self._max_damage_select_move()
+
+        return move
+
+    def _execute_move(self, move: int) -> TowerState:
+        # I put some custom logic here to go down the move list in order of most-> least damaging move
+        #  instead of just choosing the next move in the list
+        if self.move_damage_cache is None:
+            return super()._execute_move(move)
+
+        move_damages = self.move_damage_cache.copy()
+
+        # this is a bit of a pain; numpy preserves the ordering of elements while sorting, so if 0 and 1 both have the same value we'd get ... 0, 1
+        # and since we want descending, it'd go 1, 0, 3, 4... so I can't just np.argsort(move_cache)[::-1] b/c I want it go go like 0, 1, ...
+
+        state = self.state
+
+        advanced_game = False
+        for _ in range(len(move_damages)):
+            self._goto_move(move)
+
+            self._general_button_press('A')
+            state = self._wait_for_battle_states()
+
+            # any other state but MOVE_SELECT means that the move 'worked' (i.e. advanced the game)
+            # and so we can handle the logic of the next turn, otherwise we have to keep looping through the moves and trying them
+            if state != TowerState.MOVE_SELECT:
+                advanced_game = True
+                self.state = TowerState.BATTLE  # this is important b/c we need to reset the state back to BATTLE
+
+                break
+
+            # bit of a hack, but this basically lets re-use the select_move code while masking all moves that failed
+            tmp_damage_cache = self.move_damage_cache
+            move_damages[move] = -1 # essentially will never be chosen
+            self.move_damage_cache = move_damages
+            move = self._select_move()
+            self.move_damage_cache = tmp_damage_cache
+
+        if not advanced_game:
+            self._log_error_image('could_not_make_move', state)
+            raise ValueError('Could not select a move while in move select (for some reason)')
+
+        return state
+
+    def _wait_for_battle_states(self):
+        return self._wait_for(
+            # NOTE: this is how we keep track of the opponent's name as closely as "real time" as possible (since checks are run every frame)
+            # The watcher has to look *before* any other checks b/c once a check is found, no other checks are run
+            (self._get_pokemon_names, TowerState.WAITING),
+            (in_battle, TowerState.BATTLE),
+            (in_move_select, TowerState.MOVE_SELECT),
+            (pokemon_is_fainted, TowerState.SWAP_POKEMON),
+            (is_next_opponent_box, TowerState.WON_BATTLE),
+            (at_save_battle_video, TowerState.END_OF_SET),
+            button_press='A',
+            # since we need some more advanced logic, I don't want anything advancing automatically
+            # NOTE: DON'T CHANGE THIS OR ELSE IT CAUSES A REALLY TRICKY BUG WHEN WAITING FOR BOTH BATTLE AND MOVE_SELECT
+            check_first=True,
+        )
+
+    def _run_battle_loop(self) -> TowerState:
+        state = super()._run_battle_loop()
+
+        # this is a good place to reset the info now that we're done with the battle
+        self.opp_pkmn_info = None
+        self.opp_pkmn_info = None
+
+        return state
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.DEBUG)
 
     agent = BattleTowerSearchV3Agent(
-        render=True,
+        render=False,
         depth=1,
-        #db_interface=BattleTowerServerDBInterface()
+        db_interface=BattleTowerServerDBInterface()
     )
 
     agent.play()
