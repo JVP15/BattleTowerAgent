@@ -601,7 +601,7 @@ class BattleTowerSearchV2Agent(BattleTowerAgent):
                 try:
                     result = self.result_queue.get(block=False)
                 except:
-                    self._act()
+                    self.cur_frame = self._act()
             completed_searches += 1
 
             won_battle = result.won

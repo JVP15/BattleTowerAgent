@@ -1,5 +1,6 @@
 import pathlib
 import time
+from collections import deque
 
 import cv2
 import numpy as np
@@ -39,6 +40,9 @@ AFTER_PRESS_WAIT = 30 # I have no good justification for this, we just need to s
 # a full battle may take about 20k frames, and if it takes that much time while *waiting* for something,
 # then something probably went wrong
 MAX_WAIT_CYCLES = 20_000
+
+# for better error handling, we'll log the last N frames (at say, 15 FPS to preserve memory and disk space)
+MAX_DEBUG_VIDEO_LENGTH = 15 * 10 # 15 FPS x 10 seconds of video
 
 DATA_DIR = os.path.join(ROOT_DIR, 'data')
 REF_IMG_DIR = os.path.join(DATA_DIR, 'reference_images')
@@ -392,6 +396,8 @@ class BattleTowerAgent:
         self.num_attempts = 0
         self.cur_frame = self.env.step(None)
 
+        self.debug_video = deque(maxlen=MAX_DEBUG_VIDEO_LENGTH)
+
         self.num_cycles = 0
         self.cur_battle_start_cycle = 0 # this is useful for keeping track of the duration of a battle (mainly for DB logging purposes)
 
@@ -552,7 +558,11 @@ class BattleTowerAgent:
     def _act(self, action: str | None = None) -> np.ndarray:
         """This function is basically a wrapper for the env.step but it also handles render logic"""
         frame = self.env.step(action)
-        self.num_cycles +=1
+        self.num_cycles += 1
+
+        if self.num_cycles % 4 == 0:
+            self.debug_video.append(frame)
+
         if self.render:
             # for display purposes, I want the screen to be 2x bigger
             display_frame = cv2.resize(frame, (frame.shape[1] * 2, frame.shape[0] * 2), interpolation=cv2.INTER_NEAREST)
@@ -828,6 +838,7 @@ class BattleTowerAgent:
                 self.cur_frame = self._act()
 
     def _log_error_image(self, message='', state=None):
+        """Whenever there is an error, we log a video of the last part of gameplay"""
         log_dir = os.path.join(ROOT_DIR, 'log', 'debug')
         os.makedirs(log_dir, exist_ok=True)
         now = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
@@ -840,9 +851,10 @@ class BattleTowerAgent:
         if state:
             log_fname += '_' + str(state).replace('.', '-') # TowerState strs look like TowerState.Battle but we want to get rid of the .
 
-        log_fname += '.png'
-
-        cv2.imwrite(os.path.join(log_dir, log_fname), self.cur_frame)
+        video_dir = os.path.join(log_dir, log_fname)
+        os.makedirs(video_dir, exist_ok=True) # this probably shouldn't happen but b/c of the time foolery stuff I do on linux, we should be careful
+        for i, frame in enumerate(self.debug_video):
+            cv2.imwrite(os.path.join(video_dir, f'frame_{i}.jpg'), frame)
 
 
 GARCHOM_SUICUNE_SCIZOR_TEAM = """Garchomp @ Focus Sash  
