@@ -30,35 +30,19 @@ from battle_tower_agent.agent import (
     our_pokemon_is_out,
 )
 
-from battle_tower_agent.max_agent import extract_pokemon_name, JS_TEMPLATE, SCRIPT_DIR
+from battle_tower_agent.max_agent import extract_pokemon_name, JS_TEMPLATE, SCRIPT_DIR, BattleTowerMaxDamageAgent
 from battle_tower_agent.search_agent import InvalidMoveSelected
+from battle_tower_agent.search_agent_v2 import SUBAGENT_STOPPING_TURN, EarlySearchStop, SwappedPokemon, \
+    SearchResultMessage
 
 logger = logging.getLogger('SearchWorkerV3')
 
-# Constants
-SUBAGENT_STOPPING_TURN = 10
-DEFAULT_MOVE = 0
-
-
-class SwappedPokemon(Exception):
-    pass
-
-
-class EarlySearchStop(Exception):
-    pass
-
-
-@dataclass
-class SearchResultMessage:
-    won: bool
-    damage_dealt: int
-    moves: list[int]
-    turns: int
-    swap_to: int | None
-
-
 class HPWatcher:
-    """Tracks the HP bar of the opponent Pokemon in real-time."""
+    """
+    Tracks the HP bar of the opponent Pokemon in real-time.
+
+    Custom b/c it logs to a file
+    """
 
     def __init__(self, damage_file=None):
         self.opp_hp = None
@@ -92,7 +76,7 @@ class HPWatcher:
         return False  # Not a condition to stop waiting
 
 
-class BattleTowerSearchV3SubAgent(BattleTowerAgent):
+class BattleTowerSearchV3SubAgent(BattleTowerMaxDamageAgent):
     """Agent to 'look ahead' for the next possible moves using max damage strategy"""
 
     strategy = 'move_select'
@@ -114,26 +98,17 @@ class BattleTowerSearchV3SubAgent(BattleTowerAgent):
             stop_file: Path to a file whose existence signals that the search should stop
             damage_file: Path to a file where damage updates will be written
         """
-        super().__init__(render=True, savestate_file=savestate_file)
+        super().__init__(render=False, savestate_file=savestate_file, team=team)
 
         if isinstance(moves, int):
             moves = [moves]
 
         self.moves = moves
         self.move_idx = 0
-        self.team = ''  # No DB logging for searches
         self.swap_to = swap_to
-        self.team_dict = team
 
         self.stop_file = stop_file
         self.hp_watcher = HPWatcher(damage_file=damage_file)
-
-        # Max damage agent properties
-        self.cur_pkmn_info = None
-        self.cur_pkmn_name = None
-        self.opp_pkmn_info = None
-        self.opp_pkmn_name = None
-        self.move_damage_cache = None
 
     def play_remainder_of_battle(self) -> TowerState:
         """Plays until win, pokemon swap, or battle end."""
@@ -187,103 +162,6 @@ class BattleTowerSearchV3SubAgent(BattleTowerAgent):
             check_first=True,
         )
 
-    def _get_pokemon_names(self, frame):
-        if self.state == TowerState.BATTLE:
-            # Track our Pokémon
-            pokemon_info_position = our_pokemon_is_out(frame)
-            if pokemon_info_position:
-                cur_info = get_cur_pokemon_info(frame, position=pokemon_info_position)
-                if self.cur_pkmn_name is None or (cur_info != self.cur_pkmn_info).any():
-                    self.cur_pkmn_info = cur_info
-                    self.cur_pkmn_name = extract_pokemon_name(cur_info)
-                    self.move_damage_cache = None
-
-            # Track opponent's Pokémon
-            if opp_pokemon_is_out(frame):
-                opp_info = get_opponent_pokemon_info(frame)
-                if self.opp_pkmn_info is None or (opp_info != self.opp_pkmn_info).any():
-                    self.opp_pkmn_info = opp_info
-                    self.opp_pkmn_name = extract_pokemon_name(opp_info)
-                    self.move_damage_cache = None
-
-        return False  # Not a condition to stop waiting
-
-    def _calculate_move_damages(self):
-        """Calculate damage for each move against the opponent"""
-        if not self.cur_pkmn_name or not self.opp_pkmn_name:
-            return None
-
-        pkmn_name = self.cur_pkmn_name.title()
-        if pkmn_name not in self.team_dict:
-            logger.warning(f"Pokemon {pkmn_name} not found in team dictionary")
-            return None
-
-        details_json = json.dumps(self.team_dict[pkmn_name])
-
-        # Fill the JavaScript template
-        js_code = JS_TEMPLATE.format(
-            our_pkmn_name=pkmn_name,
-            our_pkmn_details_json=details_json,
-            opponent_pkmn_name=self.opp_pkmn_name
-        )
-
-        js_file = None
-        damage_results = None
-        try:
-            # Create temporary file
-            js_file = tempfile.NamedTemporaryFile(mode='w', suffix='.js', delete=False, encoding='utf-8',
-                                                  dir=SCRIPT_DIR)
-            js_filepath = js_file.name
-            js_file.write(js_code)
-            js_file.close()
-
-            # Run Node.js script
-            process = subprocess.run(
-                ['node', js_filepath],
-                capture_output=True,
-                text=True,
-                check=False,
-                encoding='utf-8'
-            )
-
-            if process.returncode != 0:
-                logger.warning(f"Error executing Node.js script:\n {process.stderr}")
-            else:
-                damage_results = json.loads(process.stdout)
-
-        except FileNotFoundError:
-            logger.error("Error: 'node' command not found. Is Node.js installed?")
-        except Exception as e:
-            logger.error(f"Error calculating move damages: {e}")
-        finally:
-            if js_file and os.path.exists(js_filepath):
-                try:
-                    os.remove(js_filepath)
-                except OSError as e:
-                    logger.warning(f"Could not remove temporary file {js_filepath}: {e}")
-
-        return damage_results
-
-    def _max_damage_select_move(self):
-        """Select the move that deals maximum damage"""
-        if self.move_damage_cache is None:
-            damage_results = self._calculate_move_damages()
-            if damage_results is None:
-                return 0  # Default to first move if calculation fails
-
-            self.move_damage_cache = np.array(list(damage_results.values()))
-            logger.debug(f'{self.cur_pkmn_name} vs {self.opp_pkmn_name} move damage: {damage_results}')
-
-        # Optimize for opponent's current HP
-        if opp_pokemon_is_out(self.cur_frame):
-            opp_hp = get_opponent_hp_bar(self.cur_frame) / 100
-        else:
-            opp_hp = 1
-
-        move_damages = self.move_damage_cache.copy()
-        move_damages[move_damages > opp_hp] = opp_hp
-
-        return np.argmax(move_damages)
 
     def _select_move(self) -> int:
         """Select move based on search depth or max damage"""
@@ -295,46 +173,10 @@ class BattleTowerSearchV3SubAgent(BattleTowerAgent):
             move = self.moves[self.move_idx]
         else:
             # Use max damage strategy for moves beyond the search depth
-            move = self._max_damage_select_move()
+            move = super()._select_move()
 
         self.move_idx += 1
         return move
-
-    def _execute_move(self, move: int) -> TowerState:
-        """Execute the selected move, trying alternatives if the first choice fails"""
-        if self.move_damage_cache is None:
-            # Fall back to regular move execution if we don't have damage cache
-            self._goto_move(move)
-            self._general_button_press('A')
-            state = self._wait_for_battle_states()
-            return state
-
-        move_damages = self.move_damage_cache.copy()
-        state = self.state
-        advanced_game = False
-
-        for _ in range(len(move_damages)):
-            self._goto_move(move)
-            self._general_button_press('A')
-            state = self._wait_for_battle_states()
-
-            if state != TowerState.MOVE_SELECT:
-                advanced_game = True
-                self.state = TowerState.BATTLE
-                break
-
-            # Try next best move if this one failed
-            tmp_damage_cache = self.move_damage_cache
-            move_damages[move] = -1
-            self.move_damage_cache = move_damages
-            move = self._max_damage_select_move()
-            self.move_damage_cache = tmp_damage_cache
-
-        if not advanced_game:
-            self._log_error_image('could_not_make_move', state)
-            raise ValueError('Could not select a valid move')
-
-        return state
 
     def _swap_to_next_pokemon(self):
         """Stop search when a pokemon needs to be swapped"""

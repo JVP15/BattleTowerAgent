@@ -244,8 +244,8 @@ class SearchProcessClient:
         if self.swap_to is not None:
             cmd.extend(['--swap-to', str(self.swap_to)])
 
-        # Launch the worker process
-        self.process = subprocess.Popen(cmd)
+        # Launch the worker process (the stdout *finally* captures the output of DesMuMe)
+        self.process = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True)
         self.is_running = True
 
         # Start monitoring damage file
@@ -489,6 +489,8 @@ class BattleTowerSearchV3Agent(BattleTowerMaxDamageAgent):
                             logger.debug('Found the best move so far, stopping early.')
                             break
 
+                    process.stop()
+
             # TODO: there is probably a better way here (likely Threading Events or Queues)
             #   than just polling and sleeping
             time.sleep(0.01)
@@ -596,9 +598,10 @@ if __name__ == '__main__':
     logging.basicConfig(level=logging.DEBUG)
 
     agent = BattleTowerSearchV3Agent(
+        #savestate_file=os.path.join(ROM_DIR, 'Post Palmer.dst'),
         render=False,
         depth=1,
-        #db_interface=BattleTowerServerDBInterface()
+        db_interface=BattleTowerServerDBInterface()
     )
 
     agent.play()
