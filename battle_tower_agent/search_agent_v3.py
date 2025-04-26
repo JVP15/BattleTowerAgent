@@ -2,13 +2,18 @@ import json
 import logging
 import multiprocessing
 import os
+import shutil
 import subprocess
+import sys
 import tempfile
+import threading
+import time
 import traceback
 import uuid
 
 from dataclasses import dataclass
 from multiprocessing import Queue, Value, Event, Barrier
+from typing import List, Tuple
 
 import numpy as np
 
@@ -44,6 +49,11 @@ from battle_tower_agent.search_agent_v2 import BattleTowerSearchV2Agent, EarlySe
 DEFAULT_MOVE = 0
 
 logger = logging.getLogger('SearchTowerAgent')
+
+
+SEARCH_PROCESS_DIR = os.path.join(SEARCH_SAVESTATE_DIR, 'processes')
+os.makedirs(SEARCH_PROCESS_DIR, exist_ok=True)
+
 
 if os.name == 'nt':
     SEARCH_TEAM_SAVESTATE = os.path.join(ROM_DIR, 'Pokemon - Platinum Battle Tower Search V3 Team.dst')
@@ -250,6 +260,139 @@ def init_search_process(
         # once we've submitted our results, we just have to wait for all other processes to clear up
         search_stop_barrier.wait()
 
+class SearchProcessClient:
+    """Manages a single search worker subprocess"""
+
+    def __init__(self, session_id: str, idx: int, moves: list[int], team_file: str, swap_to: int | None = None):
+        self.session_id = session_id
+        self.idx = idx
+        self.moves = moves
+        self.swap_to = swap_to
+        self.team_file = team_file
+
+        # Create process-specific directory
+        self.process_dir = os.path.join(SEARCH_PROCESS_DIR, f"{session_id}_{idx}")
+        os.makedirs(self.process_dir, exist_ok=True)
+
+        # File paths for communication
+        self.result_file = os.path.join(self.process_dir, 'result.json')
+        self.damage_file = os.path.join(self.process_dir, 'damage.txt')
+        self.done_file = os.path.join(self.process_dir, 'done.txt')
+        self.stop_file = os.path.join(self.process_dir, 'stop.txt')
+
+        # Process state
+        self.process = None
+        self.is_running = False
+        self.current_damage = 0
+
+        # Thread for monitoring damage
+        self.damage_monitor_thread = None
+        self.stop_monitoring = threading.Event()
+
+    def start(self, savestate_file: str):
+        """Start the search process"""
+        # Clean any existing files
+        for file_path in [self.result_file, self.damage_file, self.done_file, self.stop_file]:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+
+        # Build command for the search worker
+        worker_script = os.path.join(os.path.dirname(__file__), 'search_worker_v3.py')
+        cmd = [
+            sys.executable, worker_script,
+            '--savestate', savestate_file,
+            '--moves', ','.join(map(str, self.moves)),
+            '--team', self.team_file,
+            '--result-file', self.result_file,
+            '--damage-file', self.damage_file,
+            '--done-file', self.done_file,
+            '--stop-file', self.stop_file
+        ]
+
+        if self.swap_to is not None:
+            cmd.extend(['--swap-to', str(self.swap_to)])
+
+        # Launch the worker process
+        self.process = subprocess.Popen(cmd)
+        self.is_running = True
+
+        # Start monitoring damage file
+        self.stop_monitoring.clear()
+        self.damage_monitor_thread = threading.Thread(target=self._monitor_damage)
+        self.damage_monitor_thread.daemon = True
+        self.damage_monitor_thread.start()
+
+    def stop(self):
+        """Stop the search process"""
+        if self.is_running:
+            # Signal the process to stop
+            with open(self.stop_file, 'w') as f:
+                f.write('stop')
+
+            # Stop monitoring thread
+            self.stop_monitoring.set()
+            if self.damage_monitor_thread and self.damage_monitor_thread.is_alive():
+                self.damage_monitor_thread.join(timeout=1.0)
+
+            # Wait for process to exit
+            try:
+                self.process.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                # Force terminate if still running
+                self.process.terminate()
+                try:
+                    self.process.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()
+
+            self.is_running = False
+
+    def get_result(self) -> SearchResultMessage | None:
+        """Get the search result if available"""
+        if os.path.exists(self.result_file):
+            try:
+                with open(self.result_file, 'r') as f:
+                    data = json.load(f)
+                return SearchResultMessage(
+                    won=data['won'],
+                    damage_dealt=data['damage_dealt'],
+                    moves=data['moves'],
+                    turns=data['turns'],
+                    swap_to=data.get('swap_to')
+                )
+            except Exception as e:
+                logger.error(f"Error loading result file: {e}")
+        return None
+
+    def is_done(self) -> bool:
+        """Check if the search process is complete"""
+        return os.path.exists(self.done_file)
+
+    def _monitor_damage(self):
+        """Monitor the damage file for updates"""
+        while not self.stop_monitoring.is_set():
+            if os.path.exists(self.damage_file):
+                try:
+                    with open(self.damage_file, 'r') as f:
+                        damage_str = f.read().strip()
+                        if damage_str:
+                            self.current_damage = int(damage_str)
+                except Exception:
+                    pass  # Ignore read errors, will try again
+
+            # there is *definitely* a better way to do this but I want to move fast
+            #  b/c this branch isn't even that important
+            time.sleep(0.1)
+
+    def cleanup(self):
+        """Clean up process resources"""
+        self.stop()
+        if os.path.exists(self.process_dir):
+            try:
+                shutil.rmtree(self.process_dir)
+            except Exception as e:
+                logger.warning(f"Failed to clean up process directory: {e}")
+
 
 GARCHOMP_SUICUNE_SCIZOR_TEAM = {
     "Garchomp": {
@@ -296,7 +439,8 @@ GARCHOMP_SUICUNE_SCIZOR_TEAM = {
 }
 
 
-class BattleTowerSearchV3Agent(BattleTowerSearchV2Agent):
+# b/c we have custom search code for linux, I subclass the MaxDamageAgent here
+class BattleTowerSearchV3Agent(BattleTowerMaxDamageAgent):
     """
     V3 Strategy:
     Basically the V2 strategy, except the subagent uses the "max_damage" rules (i.e. it doesn't just hit A)
@@ -326,232 +470,195 @@ class BattleTowerSearchV3Agent(BattleTowerSearchV2Agent):
             team: The team (in Pokemon Showdown format) used in the battle tower.
                 By default, goes with the team that is chosen with the default savestate.
         """
-        team_str = dict_to_pokemon_sets_string(team)
         self.team_dict = team
 
-        super().__init__(render, savestate_file, db_interface, team=team_str, search_swap=False) # we don't support swapping yet
+        super().__init__(render, savestate_file, db_interface, team=team)
 
         self.strategy = f'search_v3_depth_{depth}'
 
-        # until I refactor the max damage stuff into a mixin, I need add this in manually
-        # plus I want to play Pokemon roms right now while I let the search run so... gotta make this quick
+        # we're just going to pass most things via files instead of worrying about stin/out
+        self.team_file = os.path.join(SEARCH_PROCESS_DIR, f"team_{uuid.uuid4().hex}.json")
+        with open(self.team_file, 'w') as f:
+            json.dump(team, f)
 
-        self.cur_pkmn_info = None
-        self.cur_pkmn_name = None
+        # Tracking winning moves
+        self.winning_move_list = None
+        self.winning_move_idx = 0
+        self.pred_turns_to_win = 0
 
-        self.opp_pkmn_info = None
-        self.opp_pkmn_name = None
+        self.savestate_path = None
+        self.session_id = uuid.uuid4().hex
 
-        self.move_damage_cache = None
+        # Generate possible moves based on search depth
+        self.depth = depth
+        if depth == 1:
+            self.possible_moves = [[move] for move in range(POKEMON_MAX_MOVES)]
+        elif depth == 2:
+            self.possible_moves = [[first, second] for first in range(POKEMON_MAX_MOVES) for second in
+                                   range(POKEMON_MAX_MOVES)]
+        else:
+            raise NotImplementedError("Only depths 1 and 2 are supported")
 
-        self.team = dict_to_pokemon_sets_string(team)
-        self.team_dict = team
-
-
-    # this gets called in the search agent's init fn
-    def _start_search_processes(self):
-        # TODO: there seems to be problems with mutliprocessing on WSL (at least for windows 10), investigate later
-        ctx = multiprocessing.get_context('forkserver' if os.name == 'posix' else None)
+        # Create search processes
+        self.search_processes = []
         for i, move_list in enumerate(self.possible_moves):
-            p = ctx.Process(
-                target=init_search_process, # args look like savestate_queue, moves, swap_to (set to None), team (in dict form), result_queue, stop_event, stop_barrier, and damage
-                args=(self.savestate_file_queues[i], move_list, None, self.team_dict, self.result_queue, self.stop_event, self.search_stop_barrier, self.damage_values[i])
-            )
-            self.processes.append(p)
-            p.start()
+            process = SearchProcessClient(self.session_id, i, move_list, self.team_file)
+            self.search_processes.append(process)
 
-        # TODO: support swapping
-
-    def _get_pokemon_names(self, frame):
-        # realistically, we don't even need to get the opponent's name in move select, just in-battle will work!
-        #  this does mean that multi-turn moves (e.g. Outrage) won't get a new name whenever we cause a Pokemon to faint but that should be fine
-        if self.state == TowerState.BATTLE:
-            # we need to keep track of both our pokemon and our opponent's
-            pokemon_info_position = our_pokemon_is_out(frame)
-            if pokemon_info_position:
-                cur_info = get_cur_pokemon_info(frame, position=pokemon_info_position)
-                if self.cur_pkmn_name is None or (cur_info != self.cur_pkmn_info).any():
-                    self.cur_pkmn_info = cur_info
-                    self.cur_pkmn_name = extract_pokemon_name(cur_info)
-
-                    # anytime we change or our opponent changes pokemon, we have to re-calculate the move damages
-                    self.move_damage_cache = None
-
-            if opp_pokemon_is_out(frame):
-                opp_info = get_opponent_pokemon_info(frame)
-                if self.opp_pkmn_info is None or (opp_info != self.opp_pkmn_info).any():
-                    self.opp_pkmn_info = opp_info
-                    self.opp_pkmn_name = extract_pokemon_name(opp_info)
-
-                    self.move_damage_cache = None
-
-        # since we're kinda hacking `wait_for`, it needs to return a bool to indicate that the check failed
-        return False
-
-    def _calculate_move_damages(self):
-        """
-        Calculates the damage (to be conservative, I take the min) for each move against an opponent,
-        considering all opponent abilities. Damages are normalized so that 0 is no damage and 1 is a full HP bar (can be > than 1)
-
-        Returns:
-            dict: A dictionary mapping move names to calculated damage or None if an error occurred.
-
-        NOTE: I'm working w/ a dict right now b/c it's nice to see how much each move does, but this may change to an array in the future.
-        """
-        pkmn_name = self.cur_pkmn_name.title() # it's normally in ALL_CAPS but the names in the dict are not
-        details_json = json.dumps(self.team_dict[pkmn_name])
-
-        # Fill the JavaScript template
-        js_code = JS_TEMPLATE.format(
-            our_pkmn_name=pkmn_name,
-            our_pkmn_details_json=details_json,
-            opponent_pkmn_name=self.opp_pkmn_name
-        )
-
-        # I just found out that tempfile exists, maybe I should use it for savestates too...
-        js_file = None
-        damage_results = None
-        try:
-            # Create a temporary file with .js extension
-            # delete=False is important on Windows, manually delete later
-            js_file = tempfile.NamedTemporaryFile(mode='w', suffix='.js', delete=False, encoding='utf-8', dir=SCRIPT_DIR)
-            js_filepath = js_file.name
-
-            js_file.write(js_code)
-            js_file.close()  # Close the file handle before letting node access it
-
-            # Ensure node is in your PATH or provide the full path
-            process = subprocess.run(
-                ['node', js_filepath],
-                capture_output=True,
-                text=True,  # Decodes stdout/stderr automatically
-                check=False,
-                encoding='utf-8'
-            )
-
-            # the code *shouldn't* break (since it already runs) but... ya never know
-            if process.returncode != 0:
-                logger.warning(f"Error executing Node.js script:\n {process.stderr}")
-            else:
-                damage_results = json.loads(process.stdout)
-
-        except FileNotFoundError:
-            logger.error("Error: 'node' command not found. Is Node.js installed and in your PATH?")
-        finally:
-            # --- Cleanup ---
-            if js_file and os.path.exists(js_filepath):
-                try:
-                    os.remove(js_filepath)
-                except OSError as e:
-                    logger.warning(f"Warning: Could not remove temporary file {js_filepath}: {e}")
-
-        return damage_results
-
-    def _max_damage_select_move(self):
-        if self.move_damage_cache is None:
-            damage_results = self._calculate_move_damages()
-            if damage_results is None: # gotta check for an error here
-                return 0 # just go w/ the first and "best" move
-            # calculate move damages but  we only really need the array
-            self.move_damage_cache = np.array(list(damage_results.values()))
-
-            #  TODO: handle possible EVs
-
-            logger.debug(f'{self.cur_pkmn_name} vs {self.opp_pkmn_name} move damage: {damage_results}')
-
-        # optimization: we may as well just choose the move that goes for the kill instead of the most damage
-        if opp_pokemon_is_out(self.cur_frame):
-            opp_hp = get_opponent_hp_bar(self.cur_frame) / 100 # HP bar is 0-100, we want 0-1
-        else:
-            opp_hp = 1
-
-        move_damages = self.move_damage_cache.copy()
-        move_damages[move_damages > opp_hp] = opp_hp
-
-        # okay due to the problem below this... doesn't actually get chosen but that's a bug for another day
-        move = np.argmax(move_damages)
-
-        return move
-
-
-    def _select_move(self) -> int:
-        # basically this is the v2 search
-        if self.winning_move_list is None:
-            move = super()._select_move()
-        # v2 search w/ a cached move list (i.e. we know it's going to go 1, then 0, then max_damage)
-        elif self.winning_move_idx < len(self.winning_move_list):
-            move = self.winning_move_list[self.winning_move_idx]
-        # and for the "default" move we use the max damage stuff
-        else:
-            move = self._max_damage_select_move()
-
-        return move
-
-    def _execute_move(self, move: int) -> TowerState:
-        # I put some custom logic here to go down the move list in order of most-> least damaging move
-        #  instead of just choosing the next move in the list
-        if self.move_damage_cache is None:
-            return super()._execute_move(move)
-
-        move_damages = self.move_damage_cache.copy()
-
-        # this is a bit of a pain; numpy preserves the ordering of elements while sorting, so if 0 and 1 both have the same value we'd get ... 0, 1
-        # and since we want descending, it'd go 1, 0, 3, 4... so I can't just np.argsort(move_cache)[::-1] b/c I want it go go like 0, 1, ...
-
-        state = self.state
-
-        advanced_game = False
-        for _ in range(len(move_damages)):
-            self._goto_move(move)
-
-            self._general_button_press('A')
-            state = self._wait_for_battle_states()
-
-            # any other state but MOVE_SELECT means that the move 'worked' (i.e. advanced the game)
-            # and so we can handle the logic of the next turn, otherwise we have to keep looping through the moves and trying them
-            if state != TowerState.MOVE_SELECT:
-                advanced_game = True
-                self.state = TowerState.BATTLE  # this is important b/c we need to reset the state back to BATTLE
-
-                break
-
-            # bit of a hack, but this basically lets re-use the select_move code while masking all moves that failed
-            tmp_damage_cache = self.move_damage_cache
-            move_damages[move] = -1 # essentially will never be chosen
-            self.move_damage_cache = move_damages
-            move = self._select_move()
-            self.move_damage_cache = tmp_damage_cache
-
-        if not advanced_game:
-            self._log_error_image('could_not_make_move', state)
-            raise ValueError('Could not select a move while in move select (for some reason)')
-
-        return state
-
-    def _wait_for_battle_states(self):
-        return self._wait_for(
-            # NOTE: this is how we keep track of the opponent's name as closely as "real time" as possible (since checks are run every frame)
-            # The watcher has to look *before* any other checks b/c once a check is found, no other checks are run
-            (self._get_pokemon_names, TowerState.WAITING),
-            (in_battle, TowerState.BATTLE),
-            (in_move_select, TowerState.MOVE_SELECT),
-            (pokemon_is_fainted, TowerState.SWAP_POKEMON),
-            (is_next_opponent_box, TowerState.WON_BATTLE),
-            (at_save_battle_video, TowerState.END_OF_SET),
-            button_press='A',
-            # since we need some more advanced logic, I don't want anything advancing automatically
-            # NOTE: DON'T CHANGE THIS OR ELSE IT CAUSES A REALLY TRICKY BUG WHEN WAITING FOR BOTH BATTLE AND MOVE_SELECT
-            check_first=True,
-        )
+        # Track healthy Pokemon
+        self.healthy_pokemon = NUM_POKEMON_IN_SINGLES
 
     def _run_battle_loop(self) -> TowerState:
         state = super()._run_battle_loop()
-
-        # this is a good place to reset the info now that we're done with the battle
-        self.opp_pkmn_info = None
-        self.opp_pkmn_info = None
+        self._reset_winning_moves() # IMPORTANT: need to reset the winning move list after each battle
+        self.healthy_pokemon = NUM_POKEMON_IN_SINGLES # also need to reset the # of healthy pokemon here
 
         return state
+
+    def _do_search(self, processes: List[SearchProcessClient]) -> SearchResultMessage | None:
+        """Perform the search and return the best result"""
+        # Create a temporary savestate
+        savestate_file = uuid.uuid4().hex + '.dst'
+        self.savestate_path = os.path.join(SEARCH_SAVESTATE_DIR, savestate_file)
+        self.env.emu.savestate.save_file(self.savestate_path)
+
+        # Start all search processes
+        for process in processes:
+            process.start(self.savestate_path)
+
+        # Monitor processes for results
+        best_result = None
+        completed_searches = 0
+        total_processes = len(processes)
+
+        while best_result is None and completed_searches < total_processes:
+            # Check for completed processes
+            for process in processes:
+                if process.is_running and process.is_done():
+                    result = process.get_result()
+                    completed_searches += 1
+
+                    if result and result.won:
+                        # Found a winning move
+                        best_result = result
+
+                        self.winning_move_list = result.moves
+                        self.pred_turns_to_win = result.turns
+                        self.winning_move_idx += 1
+
+                        logger.debug(f'Found a winning move, stopping early.')
+                        break
+                    # if we didn't win, check if it's the best result *so far*
+                    # which is typically good enough
+                    elif result:
+                        _, max_damage = self._damage_argmax(processes)
+                        if result.damage_dealt >= max_damage:
+                            best_result = result
+                            logger.debug('Found the best move so far, stopping early.')
+                            break
+
+            # TODO: there is probably a better way here (likely Threading Events or Queues)
+            #   than just polling and sleeping
+            time.sleep(0.01)
+
+        # Stop all remaining processes
+        for process in processes:
+            if process.is_running:
+                process.stop()
+
+        # Clean up the savestate file
+        if os.path.exists(self.savestate_path):
+            try:
+                os.remove(self.savestate_path)
+            except Exception as e:
+                logger.warning(f"Failed to remove savestate file: {e}")
+
+        # Log the final damage values
+        damages = [p.current_damage for p in processes]
+        logger.debug(f'Damage values at the end of the search: {damages}')
+
+        return best_result
+
+
+    def _select_move(self) -> int:
+        if self.winning_move_idx > self.pred_turns_to_win:
+            self._reset_winning_moves()
+            logger.info(f"We're on turn {self.winning_move_idx} of the 'winning' move list but expected to win in {self.pred_turns_to_win}, restarting search.")
+
+        # if we haven't "won" yet in a search, we have to keep searching every turn
+        if self.winning_move_list is None:
+            logger.debug(f'Searching over {self.possible_moves}')
+
+            best_result = self._do_search(self.search_processes)
+
+            if best_result:
+                move = best_result.moves[0]
+                log_str = f'After searching with a depth of {self.depth}, move {move} did {best_result.damage_dealt} damage in {best_result.turns} turns.'
+                if best_result.won:
+                    log_str += f' Won the game. Following {best_result.moves} for the rest of the game.'
+                    self.winning_move_list = best_result.moves
+                    self.pred_turns_to_win = best_result.turns
+                    self.winning_move_idx = 1  # We're already using the first move
+                logger.info(log_str)
+            else:
+                max_idx, max_damage = self._damage_argmax(self.search_processes)
+                move = self.possible_moves[max_idx][0]
+                logger.info(f'After searching with a depth of {self.depth}, '
+                            f'choosing move {move}, which led to {max_damage} damage dealt.')
+        # when we have found a winning search, we just use that cached move list/whatever the max damage is
+        else:
+            if self.winning_move_idx < len(self.winning_move_list):
+                move = self.winning_move_list[self.winning_move_idx]
+                self.winning_move_idx += 1
+            else:
+                # Fall back to max damage if we're past our winning move list
+                move = super()._select_move()
+
+            logger.info(f'Using move {move} from cached winning move list {self.winning_move_list}')
+
+        return move
+
+    def _damage_argmax(self, processes: List[SearchProcessClient]) -> Tuple[int, int]:
+        """Get the index and value of the process with the highest damage"""
+        max_idx = -1
+        max_value = -np.inf
+
+        for i, process in enumerate(processes):
+            damage = process.current_damage
+            if damage > max_value:
+                max_value = damage
+                max_idx = i
+
+        return max_idx, max_value
+
+    def _reset_winning_moves(self):
+        """This function is used to clear the movelist that we follow when we found a winner."""
+        self.winning_move_list = None
+        self.winning_move_idx = 0
+        self.pred_turns_to_win = 0
+
+    def cleanup(self):
+        """Clean up all resources"""
+        # Stop all processes
+        for process in self.search_processes:
+            process.cleanup()
+
+        # Clean up session directory
+        session_dir = os.path.join(SEARCH_PROCESS_DIR, self.session_id)
+        if os.path.exists(session_dir):
+            try:
+                shutil.rmtree(session_dir)
+            except Exception as e:
+                logger.warning(f"Failed to clean up session directory: {e}")
+
+        # Clean up team file
+        if os.path.exists(self.team_file):
+            try:
+                os.remove(self.team_file)
+            except Exception as e:
+                logger.warning(f"Failed to remove team file: {e}")
+
+
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.DEBUG)
@@ -559,7 +666,7 @@ if __name__ == '__main__':
     agent = BattleTowerSearchV3Agent(
         render=False,
         depth=1,
-        db_interface=BattleTowerServerDBInterface()
+        #db_interface=BattleTowerServerDBInterface()
     )
 
     agent.play()
