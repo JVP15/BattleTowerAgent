@@ -37,6 +37,7 @@ from battle_tower_agent.search_agent_v2 import SUBAGENT_STOPPING_TURN, EarlySear
 
 logger = logging.getLogger('SearchWorkerV3')
 
+
 class HPWatcher:
     """
     Tracks the HP bar of the opponent Pokemon in real-time.
@@ -189,8 +190,121 @@ class BattleTowerSearchV3SubAgent(BattleTowerMaxDamageAgent):
         return super()._act(action)
 
 
+def serve_persistent(args):
+    """Read JSON commands on stdin, run one search per line, write result & done files."""
+    # Load the team once (avoid re-import delay)
+    with open(args.team, 'r') as f:
+        team_dict = json.load(f)
+
+    while True:
+        line = sys.stdin.readline()
+        if not line:
+            break  # EOF => exit
+        if not line.strip():
+            continue
+
+        try:
+            msg = json.loads(line)
+        except Exception as e:
+            logger.error(f"Error parsing command: {e}")
+            continue
+
+        savestate = msg.get('savestate')
+        moves = msg.get('moves', [])
+        swap_to = msg.get('swap_to')
+
+        # Clean old files
+        for fp in [args.result_file, args.done_file, args.damage_file]:
+            if fp and os.path.exists(fp):
+                try:
+                    os.remove(fp)
+                except Exception:
+                    pass
+
+        # Initialize damage file
+        if args.damage_file:
+            try:
+                with open(args.damage_file, 'w') as f:
+                    f.write('0')
+            except Exception:
+                pass
+
+        try:
+            agent = BattleTowerSearchV3SubAgent(
+                savestate_file=savestate,
+                moves=moves,
+                team=team_dict,
+                swap_to=swap_to,
+                stop_file=args.stop_file,
+                damage_file=args.damage_file
+            )
+            try:
+                state = agent.play_remainder_of_battle()
+            except (InvalidMoveSelected, SwappedPokemon, EarlySearchStop):
+                state = TowerState.STOPPED_SEARCH
+            except Exception as e:
+                logger.warning(f"Unexpected error during search: {e}\n{traceback.format_exc()}")
+                state = TowerState.LOST_SET
+
+            # Determine win
+            won = False
+            if state == TowerState.WON_BATTLE:
+                won = True
+            elif state == TowerState.END_OF_SET:
+                try:
+                    final_state = agent._wait_for(
+                        (won_set, TowerState.WON_SET),
+                        (lost_set, TowerState.LOST_SET),
+                        button_press='B',
+                    )
+                    if final_state == TowerState.WON_SET:
+                        won = True
+                except EarlySearchStop:
+                    pass
+                except Exception as e:
+                    logger.warning(f"Error checking win/loss state: {e}")
+
+            damage_dealt = agent.hp_watcher.damage_dealt
+            if args.damage_file:
+                with open(args.damage_file, 'w') as f:
+                    f.write(str(damage_dealt))
+
+            result = SearchResultMessage(
+                won=won,
+                damage_dealt=damage_dealt,
+                moves=moves,
+                turns=agent.move_idx,
+                swap_to=swap_to
+            )
+
+            with open(args.result_file, 'w') as f:
+                json.dump(asdict(result), f)
+
+        except Exception as e:
+            logger.error(f"Fatal error in persistent search worker: {e}\n{traceback.format_exc()}")
+            try:
+                with open(args.result_file, 'w') as f:
+                    json.dump({
+                        'won': False,
+                        'damage_dealt': 0,
+                        'moves': moves,
+                        'turns': 0,
+                        'swap_to': swap_to,
+                        'error': str(e)
+                    }, f)
+            except Exception:
+                pass
+
+        finally:
+            try:
+                with open(args.done_file, 'w') as f:
+                    f.write('done')
+            except Exception:
+                pass
+
+
 def main():
-    """Main function to run the search worker"""
+    """Original single‐run entrypoint (preserved for backward‐compat)."""
     parser = argparse.ArgumentParser(description='Battle Tower Search Worker V3')
     parser.add_argument('--savestate', type=str, required=True, help='Path to savestate file')
     parser.add_argument('--moves', type=str, required=True, help='Comma-separated list of moves')
@@ -205,7 +319,6 @@ def main():
 
     args = parser.parse_args()
 
-    # Setup logging
     logging.basicConfig(
         level=getattr(logging, args.log_level),
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -305,4 +418,27 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    # If you call with --persistent, we loop reading commands, otherwise we do one run and exit
+    parser = argparse.ArgumentParser(description='Battle Tower Search Worker V3 (Persistent or Single‐Run)')
+    parser.add_argument('--savestate', type=str, help='Path to savestate (single‐run mode)')
+    parser.add_argument('--moves', type=str, help='Comma‐separated moves (single‐run mode)')
+    parser.add_argument('--team', type=str, required=True, help='Path to team configuration JSON file')
+    parser.add_argument('--swap-to', type=int, help='Pokemon slot to swap to (single‐run mode)')
+    parser.add_argument('--stop-file', type=str, help='Path to stop signal file')
+    parser.add_argument('--damage-file', type=str, help='Path to damage report file')
+    parser.add_argument('--result-file', type=str, required=True, help='Path to write results')
+    parser.add_argument('--done-file', type=str, required=True, help='Path to signal completion')
+    parser.add_argument('--persistent', action='store_true', help='Keep process alive and read JSON commands on stdin')
+    parser.add_argument('--log-level', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'], default='INFO',
+                        help='Logging level')
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+
+    if args.persistent:
+        serve_persistent(args)
+    else:
+        main()

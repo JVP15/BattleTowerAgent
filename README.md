@@ -24,6 +24,15 @@ python run.py --strategy a --render
 * `--strategy a`: This launches the Battle Tower Agent using the Only A strategy, which only ever hits the A button in the battle tower.. You can swap 'a' for `search_v1` or `search_v2` to try the other agents (see Agents for details).
 * `--render`: By default, the agents are headless, i.e. there is no UI, but this renders the battles. NOTE: this slows down battling by about 50%, so if you are just going for a long streak, don't use it.
 
+Running on a headless Linux server:
+
+```bash
+tmux list-sessions
+tmux attach -t 0
+xvfb-run python search_agent_v3.py
+xvfb-run -a faketime -f +120d python battle_tower_agent/search_agent_v3.py
+```
+
 ### Database Server:
 
 Each Battle Tower Agent keeps track of its current streak length and best streak, but when the agent stops, all progress is lost. 

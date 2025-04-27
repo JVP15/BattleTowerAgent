@@ -221,32 +221,40 @@ class SearchProcessClient:
         self.damage_monitor_thread = None
         self.stop_monitoring = threading.Event()
 
+        # Launch the persistent worker process
+        worker_script = os.path.join(os.path.dirname(__file__), 'search_worker_v3.py')
+        cmd = [
+            sys.executable, worker_script,
+            '--team', self.team_file,
+            '--result-file', self.result_file,
+            '--damage-file', self.damage_file,
+            '--done-file', self.done_file,
+            '--stop-file', self.stop_file,
+            '--persistent'
+        ]
+        self.process = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        self.is_running = True
+
     def start(self, savestate_file: str):
-        """Start the search process"""
+        """Start the search process's current task by sending it a command"""
         # Clean any existing files
         for file_path in [self.result_file, self.damage_file, self.done_file, self.stop_file]:
             if os.path.exists(file_path):
                 os.remove(file_path)
 
-        # Build command for the search worker
-        worker_script = os.path.join(os.path.dirname(__file__), 'search_worker_v3.py')
-        cmd = [
-            sys.executable, worker_script,
-            '--savestate', savestate_file,
-            '--moves', ','.join(map(str, self.moves)),
-            '--team', self.team_file,
-            '--result-file', self.result_file,
-            '--damage-file', self.damage_file,
-            '--done-file', self.done_file,
-            '--stop-file', self.stop_file
-        ]
-
+        # Send a JSON command down stdin
+        payload = {
+            'savestate': savestate_file,
+            'moves': self.moves
+        }
         if self.swap_to is not None:
-            cmd.extend(['--swap-to', str(self.swap_to)])
+            payload['swap_to'] = self.swap_to
 
-        # Launch the worker process (the stdout *finally* captures the output of DesMuMe)
-        self.process = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True)
-        self.is_running = True
+        try:
+            self.process.stdin.write(json.dumps(payload) + '\n')
+            self.process.stdin.flush()
+        except Exception as e:
+            logger.error(f"Failed to send command to worker: {e}")
 
         # Start monitoring damage file
         self.stop_monitoring.clear()
@@ -255,29 +263,21 @@ class SearchProcessClient:
         self.damage_monitor_thread.start()
 
     def stop(self):
-        """Stop the search process"""
+        """Stop the search process's current task"""
         if self.is_running:
-            # Signal the process to stop
-            with open(self.stop_file, 'w') as f:
-                f.write('stop')
+            # Signal the process to stop the current search
+            try:
+                with open(self.stop_file, 'w') as f:
+                    f.write('stop')
+            except Exception as e:
+                logger.error(f"Error writing stop file: {e}")
 
-            # Stop monitoring thread
+            # Stop the damage monitor thread
             self.stop_monitoring.set()
             if self.damage_monitor_thread and self.damage_monitor_thread.is_alive():
                 self.damage_monitor_thread.join(timeout=1.0)
 
-            # Wait for process to exit
-            try:
-                self.process.wait(timeout=2.0)
-            except subprocess.TimeoutExpired:
-                # Force terminate if still running
-                self.process.terminate()
-                try:
-                    self.process.wait(timeout=1.0)
-                except subprocess.TimeoutExpired:
-                    self.process.kill()
-
-            self.is_running = False
+            # Do NOT terminate the persistent worker here—only signal it.
 
     def get_result(self) -> SearchResultMessage | None:
         """Get the search result if available"""
@@ -310,15 +310,27 @@ class SearchProcessClient:
                         if damage_str:
                             self.current_damage = int(damage_str)
                 except Exception:
-                    pass  # Ignore read errors, will try again
-
-            # there is *definitely* a better way to do this but I want to move fast
-            #  b/c this branch isn't even that important
+                    pass
             time.sleep(0.1)
 
     def cleanup(self):
         """Clean up process resources"""
+        # First, stop any in-progress task
         self.stop()
+
+        # Then terminate the persistent worker process
+        try:
+            if self.process and self.process.poll() is None:
+                self.process.terminate()
+                try:
+                    self.process.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()
+        except Exception as e:
+            logger.warning(f"Error terminating worker process: {e}")
+        self.is_running = False
+
+        # Remove the process directory
         if os.path.exists(self.process_dir):
             try:
                 shutil.rmtree(self.process_dir)
@@ -489,16 +501,16 @@ class BattleTowerSearchV3Agent(BattleTowerMaxDamageAgent):
                             logger.debug('Found the best move so far, stopping early.')
                             break
 
+                    # signal this process to stop
                     process.stop()
 
             # TODO: there is probably a better way here (likely Threading Events or Queues)
             #   than just polling and sleeping
             time.sleep(0.01)
 
-        # Stop all remaining processes
+        # Stop all remaining processes' current tasks
         for process in processes:
-            if process.is_running:
-                process.stop()
+            process.stop()
 
         # Clean up the savestate file
         if os.path.exists(self.savestate_path):
@@ -593,7 +605,6 @@ class BattleTowerSearchV3Agent(BattleTowerMaxDamageAgent):
                 logger.warning(f"Failed to remove team file: {e}")
 
 
-
 if __name__ == '__main__':
     logging.basicConfig(level=logging.DEBUG)
 
@@ -601,7 +612,7 @@ if __name__ == '__main__':
         #savestate_file=os.path.join(ROM_DIR, 'Post Palmer.dst'),
         render=False,
         depth=1,
-        db_interface=BattleTowerServerDBInterface()
+        #db_interface=BattleTowerServerDBInterface()
     )
 
     agent.play()
