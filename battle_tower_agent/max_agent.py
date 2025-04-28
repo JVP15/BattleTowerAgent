@@ -391,9 +391,6 @@ class BattleTowerMaxDamageAgent(BattleTowerAgent):
 
         move_damages = self.move_damage_cache.copy()
 
-        # this is a bit of a pain; numpy preserves the ordering of elements while sorting, so if 0 and 1 both have the same value we'd get ... 0, 1
-        # and since we want descending, it'd go 1, 0, 3, 4... so I can't just np.argsort(move_cache)[::-1] b/c I want it go go like 0, 1, ...
-
         state = self.state
 
         advanced_game = False
@@ -411,12 +408,10 @@ class BattleTowerMaxDamageAgent(BattleTowerAgent):
 
                 break
 
-            # bit of a hack, but this basically lets re-use the select_move code while masking all moves that failed
-            tmp_damage_cache = self.move_damage_cache
-            move_damages[move] = -1 # essentially will never be chosen
-            self.move_damage_cache = move_damages
-            move = self._select_move()
-            self.move_damage_cache = tmp_damage_cache
+            # this is a bit of a pain; numpy preserves the ordering of elements while sorting, so if 0 and 1 both have the same value we'd get ... 0, 1
+            # and since we want descending, it'd go 1, 0, 3, 4... so I can't just np.argsort(move_cache)[::-1] b/c I want it go go like 0, 1, ...
+            move_damages[move] = -np.inf
+            move = move_damages.argmax()
 
         if not advanced_game:
             self._log_error_image('could_not_make_move', state)
@@ -454,8 +449,8 @@ if __name__ == '__main__':
     logging.basicConfig(level=logging.DEBUG)
 
     agent = BattleTowerMaxDamageAgent(
-        render=False,
-        db_interface=BattleTowerServerDBInterface()
+        render=True,
+        #db_interface=BattleTowerServerDBInterface()
     )
 
     agent.play()
